@@ -7,7 +7,7 @@ name = "drevo-mcp"
 version = "0.1.0"
 description = "External FastMCP server exposing a running drevo HTTP server as MCP tools"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 license = { text = "MIT OR Apache-2.0" }
 authors = [{ name = "drevo contributors", email = "noreply@ice1x.dev" }]
 keywords = ["drevo", "mcp", "fastmcp", "graph", "model-context-protocol"]
@@ -46,15 +46,15 @@ packages = ["drevo_mcp"]
 drevo_mcp = ["py.typed"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py313"
 line-length = 100
 
 [tool.black]
-target-version = ["py310", "py311", "py312", "py313"]
+target-version = ["py313"]
 line-length = 100
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.13"
 strict = true
 
 [tool.pytest.ini_options]
