@@ -1,0 +1,51 @@
+# drevo — Docker Compose (published image)
+#
+# Brings up the `drevo-server` container that this MCP talks to over HTTP.
+# Unlike the compose file in the main `drevo` repo (which *builds* the image),
+# this one pulls the prebuilt image from Docker Hub:
+#
+#     https://hub.docker.com/r/ice1x/drevo
+#
+# It publishes the HTTP API + embedded Web UI on 8080 (and the Neo4j-compatible
+# Bolt port on 7687), and BIND-MOUNTS a host folder to /data so the redb
+# database file lives on the host (inspectable, survives `docker compose down`).
+# The container runs as the host user so it can take redb's write lock on the
+# bind-mounted file.
+#
+# Usage:
+#   mkdir -p ./data                                   # or point DREVO_DATA_DIR elsewhere
+#   DREVO_UID=$(id -u) DREVO_GID=$(id -g) docker compose up -d
+#   curl localhost:8080/health ; open http://localhost:8080/ui
+#   docker compose down            # stop; the host data folder is left untouched
+#
+# The top-level `version:` key is intentionally omitted — modern Compose Spec
+# (docker-compose v2+) treats it as obsolete.
+
+services:
+  drevo:
+    image: ice1x/drevo:${DREVO_TAG:-latest}
+    container_name: drevo
+    restart: unless-stopped
+    pull_policy: missing # pull once; `docker compose pull` to refresh
+    ports:
+      - "8080:8080" # HTTP API + Web UI
+      - "7687:7687" # Bolt (Neo4j-compatible)
+    # Run as the host user so the non-root image user can read/write the
+    # bind-mounted redb file (redb takes a write lock even for read traffic).
+    user: "${DREVO_UID:-1000}:${DREVO_GID:-1000}"
+    environment:
+      DREVO_HOST: "0.0.0.0"
+      DREVO_PORT: "8080"
+      DREVO_DATA_DIR: "/data"
+    volumes:
+      # Bind-mount a host folder (not a named volume): the redb file lives on
+      # the host at ${DREVO_DATA_DIR:-./data}/drevo.redb.
+      - ${DREVO_DATA_DIR:-./data}:/data
+    healthcheck:
+      # GET /health is cheap and DB-independent, so it stays green even when
+      # the DB is under contention.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
