@@ -3,14 +3,14 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "drevo-mcp"
+name = "drevo-mcp-bolt"
 version = "0.1.0"
-description = "External FastMCP server exposing a running drevo HTTP server as MCP tools"
+description = "Bolt knowledge-graph MCP (write-capable), pointed at a running drevo server"
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT OR Apache-2.0" }
 authors = [{ name = "drevo contributors", email = "noreply@ice1x.dev" }]
-keywords = ["drevo", "mcp", "fastmcp", "graph", "model-context-protocol"]
+keywords = ["drevo", "neo4j", "bolt", "mcp", "knowledge-graph", "model-context-protocol"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -18,14 +18,14 @@ classifiers = [
     "Topic :: Database",
     "Typing :: Typed",
 ]
-# Talks to a running `drevo-server` over HTTP only — no dependency on the
-# `drevo` core or its Python bindings, and it never opens the redb file.
-dependencies = ["fastmcp>=2", "httpx>=0.27"]
+# Talks Bolt to a running drevo-server (DREVO_BOLT_PORT) or a real Neo4j —
+# the official `neo4j` driver, plus the MCP SDK's FastMCP. No drevo dependency.
+dependencies = ["mcp>=1.2", "neo4j>=5,<6"]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7",
-    "pytest-httpx>=0.30",
+    "pytest-asyncio>=0.23",
     "mypy>=1.10",
     "ruff>=0.5",
     "black>=24",
@@ -33,17 +33,17 @@ dev = [
 ]
 
 [project.scripts]
-drevo-mcp = "drevo_mcp.server:main"
+drevo-mcp-bolt = "drevo_mcp_bolt.server:main"
 
 [project.urls]
-Homepage = "https://github.com/ice1x/drevo"
-Repository = "https://github.com/ice1x/drevo"
+Homepage = "https://github.com/ice1x/drevo-mcp"
+Repository = "https://github.com/ice1x/drevo-mcp"
 
 [tool.setuptools]
-packages = ["drevo_mcp"]
+packages = ["drevo_mcp_bolt"]
 
 [tool.setuptools.package-data]
-drevo_mcp = ["py.typed"]
+drevo_mcp_bolt = ["py.typed"]
 
 [tool.ruff]
 target-version = "py313"
@@ -60,3 +60,4 @@ strict = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+asyncio_mode = "auto"

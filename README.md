@@ -1,32 +1,42 @@
-# drevo-mcp
+# drevo-mcp-bolt
 
 [![CI](https://github.com/ice1x/drevo-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ice1x/drevo-mcp/actions/workflows/ci.yml)
 
-A self-contained **[FastMCP](https://github.com/jlowin/fastmcp) server** that exposes a
-running **drevo** graph database to AI clients (Claude Code, Claude Desktop,
-OpenCode, Cline, …) as [Model Context Protocol](https://modelcontextprotocol.io)
-tools.
+A self-contained **knowledge-graph MCP server** that exposes a running **drevo**
+graph database to AI clients (Claude Code, Claude Desktop, OpenCode, Cline, …) as
+[Model Context Protocol](https://modelcontextprotocol.io) tools — **with full
+read *and* write access**.
 
-It talks to drevo **over HTTP** and **never opens the redb file directly**, so it
-does not fight the server for redb's single-process file lock — the container
-owns the file, this process is just an HTTP client. Every tool maps to one
-endpoint you can also hit with `curl`, which makes it trivial to debug.
+It is a **Bolt drop-in of the Neo4j knowledge-graph MCP**: the same tools and the
+same Cypher, but pointed at drevo's **Neo4j-compatible Bolt endpoint** instead of
+Neo4j. `drevo-server` speaks Bolt (the official `neo4j` driver accepts it) and the
+Cypher subset these tools use (`MERGE` / `datetime()` / `SET +=` / map projection
+/ `labels()` / `type()` / `properties()` / `OPTIONAL MATCH` / `collect`), so it is
+a genuine copy-and-swap.
 
 ```
-MCP client  ──stdio (MCP)──▶  drevo-mcp (this repo)  ──HTTP──▶  drevo-server (container)  ──▶  drevo.redb
+MCP client ──stdio(MCP)──▶ drevo-mcp-bolt (this repo) ──Bolt (neo4j driver)──▶ drevo-server :7687 ──▶ drevo.redb
 ```
+
+Unlike a plain HTTP wrapper, this MCP **mutates the graph**: it can create and
+delete entities and relationships, append observations, record and apply schema
+migrations, and run arbitrary Cypher. One process owns the redb file (the
+container); this MCP is just a Bolt client.
 
 This repo is **self-contained**: it ships the Python MCP, a `docker-compose.yml`
 and a `scripts/run-drevo.sh` helper that pull and start the published
-[`ice1x/drevo`](https://hub.docker.com/r/ice1x/drevo) image, and the client
-configuration snippets below.
+[`ice1x/drevo`](https://hub.docker.com/r/ice1x/drevo) image **with Bolt enabled**,
+and the client configuration snippets below.
+
+The one drevo difference from real Neo4j: `CREATE INDEX` schema DDL is unsupported
+(drevo auto-indexes), so index creation is best-effort and a no-op on drevo.
 
 ---
 
 ## Table of contents
 
 1. [Prerequisites](#prerequisites)
-2. [Step 1 — start the drevo container](#step-1--start-the-drevo-container)
+2. [Step 1 — start the drevo container (Bolt enabled)](#step-1--start-the-drevo-container-bolt-enabled)
 3. [Step 2 — install this MCP server](#step-2--install-this-mcp-server)
 4. [Step 3 — verify the wire](#step-3--verify-the-wire)
 5. [Step 4 — connect an MCP client](#step-4--connect-an-mcp-client)
@@ -34,9 +44,9 @@ configuration snippets below.
    - [OpenCode](#opencode)
    - [Cline (VS Code)](#cline-vs-code)
    - [Claude Desktop](#claude-desktop)
-6. [Tools](#tools-read-only)
+6. [Tools](#tools)
 7. [Using it from a chat](#using-it-from-a-chat)
-8. [Understanding the schema (node/edge kinds)](#understanding-the-schema-nodeedge-kinds)
+8. [The data model (entities / relationships / projects)](#the-data-model-entities--relationships--projects)
 9. [Configuration reference](#configuration-reference)
 10. [Develop / test](#develop--test)
 11. [Troubleshooting](#troubleshooting)
@@ -46,26 +56,29 @@ configuration snippets below.
 ## Prerequisites
 
 - **Docker** (to run the `drevo-server` container), and
-- **Python ≥ 3.10** (to run this MCP server).
+- **Python ≥ 3.13** (to run this MCP server).
 
 The MCP server is a normal Python process that an AI client spawns over stdio;
-the database is a separate container it reaches over HTTP.
+the database is a separate container it reaches over **Bolt** (port 7687).
 
 ---
 
-## Step 1 — start the drevo container
+## Step 1 — start the drevo container (Bolt enabled)
 
-The MCP server needs a running `drevo-server`. The image lives on Docker Hub:
-<https://hub.docker.com/r/ice1x/drevo>. Pick **any one** of the three ways below.
+The MCP server needs a running `drevo-server` **with its Bolt listener open**. The
+Bolt listener is opt-in: the server only opens 7687 when `DREVO_BOLT_PORT` is set.
+The compose file and helper script in this repo set it for you. The image lives on
+Docker Hub: <https://hub.docker.com/r/ice1x/drevo>. Pick **any one** way below.
 
 ### Option A — helper script (simplest)
 
 ```bash
-./scripts/run-drevo.sh          # pulls ice1x/drevo:latest, starts it, waits for /health
+./scripts/run-drevo.sh          # pulls ice1x/drevo:latest, enables Bolt, waits for /health
 ```
 
 It pulls the image, bind-mounts `./data` for the redb file, runs the container as
-your host user, and blocks until `GET /health` is green. Other sub-commands:
+your host user, sets `DREVO_BOLT_PORT=7687`, and blocks until `GET /health` is
+green. Other sub-commands:
 
 ```bash
 ./scripts/run-drevo.sh logs     # follow container logs
@@ -75,7 +88,7 @@ your host user, and blocks until `GET /health` is green. Other sub-commands:
 Override defaults with env vars, e.g.:
 
 ```bash
-DREVO_TAG=0.1.0 DREVO_PORT=9090 DREVO_DATA_DIR=~/drevo_data ./scripts/run-drevo.sh
+DREVO_TAG=0.1.0 DREVO_PORT=9090 DREVO_BOLT_PORT=7687 DREVO_DATA_DIR=~/drevo_data ./scripts/run-drevo.sh
 ```
 
 ### Option B — docker compose
@@ -87,7 +100,8 @@ docker compose logs -f          # watch it boot
 docker compose down             # stop later (host data dir is left untouched)
 ```
 
-`docker compose pull` refreshes to the newest `latest`.
+The compose file sets `DREVO_BOLT_PORT=7687` and publishes it. `docker compose
+pull` refreshes to the newest `latest`.
 
 ### Option C — plain `docker run`
 
@@ -96,7 +110,7 @@ mkdir -p ./data
 docker run -d --name drevo \
   -p 8080:8080 -p 7687:7687 \
   --user "$(id -u):$(id -g)" \
-  -e DREVO_HOST=0.0.0.0 -e DREVO_PORT=8080 -e DREVO_DATA_DIR=/data \
+  -e DREVO_HOST=0.0.0.0 -e DREVO_PORT=8080 -e DREVO_BOLT_PORT=7687 -e DREVO_DATA_DIR=/data \
   -v "$(pwd)/data:/data" \
   ice1x/drevo:latest
 ```
@@ -105,15 +119,16 @@ docker run -d --name drevo \
 
 ```bash
 curl localhost:8080/health      # {"status":"ok"}
+nc -z localhost 7687 && echo "bolt open"   # the Bolt listener must be open
 open http://localhost:8080/ui   # interactive graph Web UI (macOS; use your browser elsewhere)
 ```
 
 What the container exposes:
 
-| Port  | Purpose                                   |
-|-------|-------------------------------------------|
-| 8080  | HTTP API **and** the embedded Web UI (`/ui`) |
-| 7687  | Bolt (Neo4j-compatible) — not used by this MCP |
+| Port  | Purpose                                            |
+|-------|----------------------------------------------------|
+| 8080  | HTTP API **and** the embedded Web UI (`/ui`)       |
+| 7687  | **Bolt (Neo4j-compatible) — what this MCP uses**   |
 
 The redb database file is persisted on the **host** at `./data/drevo.redb` (or
 wherever `DREVO_DATA_DIR` points), so it survives `down`/`stop`.
@@ -147,23 +162,26 @@ Smoke-test the MCP protocol without any client — pipe three JSON-RPC lines in 
 watch the tool list come back:
 
 ```bash
-export DREVO_HTTP_URL=http://localhost:8080   # default; override if elsewhere
+export DREVO_BOLT_URL=bolt://localhost:7687   # default; override if elsewhere
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-  | python -m drevo_mcp
+  | python -m drevo_mcp_bolt
 ```
 
-You should see a JSON-RPC response listing `health`, `node_get`, `search_fts`, etc.
-If you do, the server and the container are talking.
+You should see a JSON-RPC response listing `create_entity`, `search_knowledge`,
+`run_cypher`, etc. If you do, the server and the container are talking over Bolt.
+
+drevo's Bolt runs **without authentication**, so the username / password are
+accepted and ignored — they only matter against a real Neo4j.
 
 ---
 
 ## Step 4 — connect an MCP client
 
-All clients launch the **same command** — `python -m drevo_mcp` — and pass the
-target server via the `DREVO_HTTP_URL` environment variable. Use the **absolute
+All clients launch the **same command** — `python -m drevo_mcp_bolt` — and pass the
+target server via the `DREVO_BOLT_URL` environment variable. Use the **absolute
 path** to your venv's `python` (from Step 2) as the command to avoid `PATH`
 surprises; below it is written as `/abs/path/to/.venv/bin/python`.
 
@@ -173,8 +191,8 @@ Easiest is the CLI (run it from anywhere):
 
 ```bash
 claude mcp add drevo \
-  --env DREVO_HTTP_URL=http://localhost:8080 \
-  -- /abs/path/to/.venv/bin/python -m drevo_mcp
+  --env DREVO_BOLT_URL=bolt://localhost:7687 \
+  -- /abs/path/to/.venv/bin/python -m drevo_mcp_bolt
 ```
 
 Add `--scope project` to write a shareable `.mcp.json` into the current repo
@@ -185,8 +203,8 @@ instead of your user config. That file looks like:
   "mcpServers": {
     "drevo": {
       "command": "/abs/path/to/.venv/bin/python",
-      "args": ["-m", "drevo_mcp"],
-      "env": { "DREVO_HTTP_URL": "http://localhost:8080" }
+      "args": ["-m", "drevo_mcp_bolt"],
+      "env": { "DREVO_BOLT_URL": "bolt://localhost:7687" }
     }
   }
 }
@@ -205,9 +223,9 @@ MCP servers go under the `mcp` key as a **local** (stdio) server:
   "mcp": {
     "drevo": {
       "type": "local",
-      "command": ["/abs/path/to/.venv/bin/python", "-m", "drevo_mcp"],
+      "command": ["/abs/path/to/.venv/bin/python", "-m", "drevo_mcp_bolt"],
       "enabled": true,
-      "environment": { "DREVO_HTTP_URL": "http://localhost:8080" }
+      "environment": { "DREVO_BOLT_URL": "bolt://localhost:7687" }
     }
   }
 }
@@ -226,18 +244,20 @@ Open Cline → **MCP Servers** → **Configure MCP Servers**, which opens
   "mcpServers": {
     "drevo": {
       "command": "/abs/path/to/.venv/bin/python",
-      "args": ["-m", "drevo_mcp"],
-      "env": { "DREVO_HTTP_URL": "http://localhost:8080" },
+      "args": ["-m", "drevo_mcp_bolt"],
+      "env": { "DREVO_BOLT_URL": "bolt://localhost:7687" },
       "disabled": false,
-      "autoApprove": ["health", "node_get", "list_nodes_by_kind", "search_fts",
-                      "neighbors", "subgraph", "shortest_path", "count_nodes"]
+      "autoApprove": ["get_entity", "search_knowledge", "get_project_graph",
+                      "list_projects", "get_migrations"]
     }
   }
 }
 ```
 
-Every tool here is **read-only**, so listing them all in `autoApprove` is safe and
-saves you a confirmation click per call.
+Unlike the read-only HTTP MCP, **these tools mutate the graph** — `create_entity`,
+`delete_entity`, `create_relationship`, `delete_relationship`, `apply_migration`
+and `run_cypher` can change or remove data. Keep those **out** of `autoApprove`
+(as above, only the read tools are listed) so each write asks for a confirmation.
 
 ### Claude Desktop
 
@@ -247,26 +267,49 @@ Edit `claude_desktop_config.json` (macOS:
 
 ---
 
-## Tools (read-only)
+## Tools
 
-The server exposes eight read-only tools. The JSON Schema for each is generated
-automatically by FastMCP from the function signatures, so clients discover
-arguments via `tools/list` — you do not declare schemas anywhere.
+The server exposes thirteen tools — **read, write, and migration**. The JSON
+Schema for each is generated automatically by FastMCP from the function
+signatures, so clients discover arguments via `tools/list`.
 
-| Tool | Arguments | drevo endpoint | Returns |
-|------|-----------|----------------|---------|
-| `health` | — | `GET /health` | `{"status":"ok"}` |
-| `node_get` | `node_id` | `GET /nodes/{id}` | the node, or `null` if absent |
-| `list_nodes_by_kind` | `kind`, `limit=50`, `offset=0` | `GET /nodes?kind=` | `{"nodes":[…]}` |
-| `search_fts` | `query`, `limit=10` | `POST /search/fts` | `{"results":[{"node":…,"score":…}]}` |
-| `neighbors` | `node_id`, `direction="both"`, `kind=None`, `depth=1` | `GET /nodes/{id}/neighbors` | `{"nodes":[…]}` |
-| `subgraph` | `node_id`, `depth=1` | `GET /nodes/{id}/subgraph` | `{"nodes":[…],"edges":[…]}` |
-| `shortest_path` | `from_id`, `to_id` | `GET /paths/shortest` | `{"path":[ids] \| null}` |
-| `count_nodes` | — | `GET /export/json` | `{"count":n}` |
+### Entities (write)
 
-`direction` is `"outgoing"` \| `"incoming"` \| `"both"`. `count_nodes` downloads
-the full export and counts it (drevo has no dedicated count endpoint yet), so it is
-fine for modest graphs.
+| Tool | Arguments | Effect |
+|------|-----------|--------|
+| `create_entity` | `name`, `entity_type`, `project`, `observations=None`, `properties=None` | Create or merge an entity (`MERGE` on `name`+`project`). |
+| `add_observations` | `name`, `project`, `observations` | Append observations to an existing entity. |
+| `delete_entity` | `name`, `project` | Delete an entity and all its relationships (`DETACH DELETE`). |
+
+### Relationships (write)
+
+| Tool | Arguments | Effect |
+|------|-----------|--------|
+| `create_relationship` | `from_entity`, `to_entity`, `relation_type`, `project`, `properties=None` | Create a typed relationship between two entities. |
+| `delete_relationship` | `from_entity`, `to_entity`, `relation_type`, `project` | Delete a specific relationship. |
+
+### Queries (read)
+
+| Tool | Arguments | Returns |
+|------|-----------|---------|
+| `get_entity` | `name`, `project` | The entity with its incoming and outgoing relationships. |
+| `search_knowledge` | `query`, `project=None` | Entities matching `query` in name or observations. |
+| `get_project_graph` | `project` | The full entity/relationship graph for a project. |
+| `list_projects` | — | All distinct project namespaces. |
+
+### Migrations (write)
+
+| Tool | Arguments | Effect |
+|------|-----------|--------|
+| `add_migration` | `project`, `description`, `cypher_up`, `cypher_down=None`, `version=None` | Record a schema/data migration (not yet applied). |
+| `get_migrations` | `project` | The migration history for a project. |
+| `apply_migration` | `project`, `seq` | Execute a pending migration's `cypher_up` and mark it applied. |
+
+### Raw Cypher (read **or** write)
+
+| Tool | Arguments | Effect |
+|------|-----------|--------|
+| `run_cypher` | `query`, `params=None` | Execute an arbitrary Cypher query — can read or mutate. |
 
 ---
 
@@ -274,76 +317,60 @@ fine for modest graphs.
 
 Once connected, just ask the assistant in natural language — it picks the tools:
 
-- *"Is the drevo server healthy?"* → `health`
-- *"Find nodes mentioning 'invoice' and show me the top 5."* → `search_fts(query="invoice", limit=5)`
-- *"Show node 42 and its direct neighbours."* → `node_get(42)` then `neighbors(42, depth=1)`
-- *"List the first 20 `task` nodes."* → `list_nodes_by_kind(kind="task", limit=20)`
-- *"Is there a path from node 3 to node 91?"* → `shortest_path(3, 91)`
-- *"Give me the 2-hop subgraph around node 7."* → `subgraph(7, depth=2)`
+- *"Add a `service` entity called `billing` to project `erp`."* → `create_entity(name="billing", entity_type="service", project="erp")`
+- *"Note that billing now depends on payments."* → `create_relationship("billing", "payments", "DEPENDS_ON", "erp")`
+- *"What do we know about billing in erp?"* → `get_entity("billing", "erp")`
+- *"Search the erp graph for anything about invoices."* → `search_knowledge("invoice", "erp")`
+- *"Show me the whole erp project graph."* → `get_project_graph("erp")`
+- *"Remove the billing→payments dependency."* → `delete_relationship("billing", "payments", "DEPENDS_ON", "erp")`
 
-A reliable pattern when you don't know ids yet: **`search_fts` to find an entry
-node → `node_get` to read it → `neighbors`/`subgraph` to expand.**
+A reliable pattern: **`create_entity` for the nodes → `create_relationship` to
+link them → `get_project_graph` / `search_knowledge` to read back.**
 
 ---
 
-## Understanding the schema (node/edge kinds)
+## The data model (entities / relationships / projects)
 
-drevo is a **property graph**. Each **node** has a numeric `id`, a `kind` (its
-label/type, e.g. `task`, `person`, `chapter`), a `title`/`body`, and properties.
-Each **edge** also has a `kind` (e.g. `depends_on`, `wrote`, `mentions`).
+This MCP models a **project-scoped knowledge graph** (the Neo4j knowledge-graph
+shape), which is a thin layer over drevo's property graph:
 
-There are two distinct "schemas" worth separating:
+- An **entity** is a node labelled `Entity` with a `name`, a `type`, a list of
+  `observations` (free-text facts), arbitrary `properties`, and a `project`
+  namespace. Entities are unique per `(name, project)`.
+- A **relationship** is a typed, directed edge between two entities in the same
+  project (e.g. `DEPENDS_ON`, `KNOWS`, `PART_OF`). Relationship types are
+  sanitised to upper-snake-case.
+- A **project** is just the `project` property — every tool takes it so multiple
+  knowledge graphs can live in one drevo instance without colliding. Discover the
+  ones that exist with `list_projects`.
+- A **migration** is a `Migration` node recording a `cypher_up` / `cypher_down`
+  pair, sequenced per project, that `apply_migration` executes on demand.
 
-1. **The MCP tool schema** — the argument shape of each tool. You do **not**
-   configure this; FastMCP derives it from the Python type hints and the client
-   fetches it via `tools/list`. Nothing to do.
+You generally pick your own entity/relationship types per scenario, for example:
 
-2. **The graph schema** — *which* `kind` values exist in your data. This is what
-   you usually mean by "the right schema", and it depends entirely on what you
-   loaded into drevo. It matters because `list_nodes_by_kind` (and the server's
-   `/nodes?kind=` / `/facets?kind=`) **require** a `kind` — you must name a kind
-   that actually exists, or you get an empty/400 result.
+| Scenario          | Example entity types                       | Example relationship types          |
+|-------------------|--------------------------------------------|-------------------------------------|
+| IT task manager   | `task`, `person`, `project`, `sprint`      | `ASSIGNED_TO`, `BLOCKS`, `PART_OF`  |
+| Bug tracker       | `bug`, `component`, `release`, `person`    | `AFFECTS`, `FIXED_IN`, `REPORTED_BY`|
+| Story / book editor | `chapter`, `scene`, `character`, `place` | `APPEARS_IN`, `PRECEDES`, `SET_IN`  |
+| CBT journal       | `entry`, `thought`, `emotion`, `distortion`| `TRIGGERS`, `REFRAMES`, `TAGGED`    |
+| ERP               | `order`, `invoice`, `product`, `customer`  | `CONTAINS`, `BILLED_TO`, `SUPPLIES` |
 
-### How to discover the kinds that exist
-
-drevo has no "list all kinds" endpoint, so discover them from the data:
-
-- **Web UI** — open `http://localhost:8080/ui` and look at the rendered graph;
-  node/edge kinds are visible there.
-- **Search first** — `search_fts("<a word you expect>")`, then `node_get(<id>)` on
-  a hit; the returned object's `kind` field tells you the label to reuse with
-  `list_nodes_by_kind`.
-- **Export** — `curl localhost:8080/export/json` dumps every node and edge; the
-  distinct `kind` values are your schema. (`count_nodes` uses this same dump.)
-
-### Telling the assistant the schema
-
-The cleanest way to get good queries is to **state the kinds up front** — in the
-client's system prompt, a project rules file, or just the first chat message — so
-the model uses real labels instead of guessing. For example, for the scenarios
-drevo targets you might tell it:
-
-| Scenario          | Example node kinds                         | Example edge kinds              |
-|-------------------|--------------------------------------------|---------------------------------|
-| IT task manager   | `task`, `person`, `project`, `sprint`      | `assigned_to`, `blocks`, `part_of` |
-| Bug tracker       | `bug`, `component`, `release`, `person`    | `affects`, `fixed_in`, `reported_by` |
-| Story / book editor | `chapter`, `scene`, `character`, `place` | `appears_in`, `precedes`, `set_in` |
-| CBT journal       | `entry`, `thought`, `emotion`, `distortion` | `triggers`, `reframes`, `tagged` |
-| ERP               | `order`, `invoice`, `product`, `customer`  | `contains`, `billed_to`, `supplies` |
-
-These are **illustrative** — replace them with the kinds your data actually uses
-(discover them as above). Once the model knows the kinds, `list_nodes_by_kind`,
-`neighbors(kind=…)`, and faceting all "just work".
+For anything the tool surface doesn't cover directly, `run_cypher` runs arbitrary
+Cypher against the same graph.
 
 ---
 
 ## Configuration reference
 
-This MCP server reads a single environment variable:
+This MCP server reads these environment variables:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `DREVO_HTTP_URL` | `http://localhost:8080` | Base URL of the running `drevo-server`. |
+| `DREVO_BOLT_URL` | `bolt://localhost:7687` | Bolt URI of the running `drevo-server`. |
+| `DREVO_BOLT_USER` | `neo4j` | Username (accepted and ignored by drevo). |
+| `DREVO_BOLT_PASSWORD` | `drevo` | Password (accepted and ignored by drevo). |
+| `DREVO_BOLT_DATABASE` | `neo4j` | Bolt database name. |
 
 The container (Step 1) reads these, mirrored by the compose file and the helper
 script:
@@ -352,7 +379,7 @@ script:
 |----------|---------|---------|
 | `DREVO_TAG` | `latest` | Image tag to pull (`latest`, `0.1.0`, …). |
 | `DREVO_PORT` | `8080` | Host port mapped to the container's HTTP API. |
-| `DREVO_BOLT_PORT` | `7687` | Host port mapped to the Bolt endpoint. |
+| `DREVO_BOLT_PORT` | `7687` | Host port mapped to the Bolt endpoint **and** the env var that opens the listener. |
 | `DREVO_DATA_DIR` | `./data` | Host folder bind-mounted to `/data` (holds `drevo.redb`). |
 | `DREVO_UID` / `DREVO_GID` | `1000` | UID/GID the container runs as (set to `$(id -u)`/`$(id -g)`). |
 
@@ -362,27 +389,35 @@ script:
 
 ```bash
 pip install -e ".[dev]"
-pytest                       # unit tests (HTTP is mocked — no live server needed)
-mypy --strict drevo_mcp/
+pytest                       # unit tests run offline (no live server needed)
+mypy --strict drevo_mcp_bolt/
 ruff check . && black --check .
 ```
 
-The test suite mocks the `httpx` transport, so `pytest` runs offline; only the
-end-to-end smoke test in [Step 3](#step-3--verify-the-wire) needs a live
-container.
+The unit tests run offline. The end-to-end test in `tests/test_integration.py` is
+**opt-in**: it drives a real Bolt server and is skipped unless `DREVO_BOLT_URL`
+is set **and** the port is open. To run it against the container from Step 1:
+
+```bash
+DREVO_BOLT_URL=bolt://localhost:7687 pytest -q tests/test_integration.py
+```
+
+It writes only into a throwaway `it-…` project namespace and deletes everything
+it creates.
 
 ---
 
 ## Troubleshooting
 
-- **Tool calls fail with a connection error** — the container isn't up or
-  `DREVO_HTTP_URL` is wrong. Check `curl localhost:8080/health` and that the URL
-  matches the host port you published.
+- **Tool calls fail with a connection error** — the container isn't up, Bolt isn't
+  enabled, or `DREVO_BOLT_URL` is wrong. Check `nc -z localhost 7687`; if it is
+  closed, the server was started without `DREVO_BOLT_PORT` (use the compose file /
+  helper script in this repo, which set it).
 - **Client shows the server as "failed to start"** — the `command` likely isn't
-  the interpreter where `drevo-mcp` is installed. Use the absolute path to your
+  the interpreter where this package is installed. Use the absolute path to your
   venv's `python` (Step 2).
-- **`list_nodes_by_kind` returns nothing** — you passed a `kind` that doesn't
-  exist. Discover the real kinds (see [the schema section](#understanding-the-schema-nodeedge-kinds)).
+- **`CREATE INDEX` errors in logs** — harmless: drevo auto-indexes and rejects
+  schema DDL, so index creation is best-effort and ignored.
 - **Permission denied writing `drevo.redb`** — the container user can't write the
   bind-mounted folder. Start it as your host user (`--user $(id -u):$(id -g)`,
   which the script and compose file already do).

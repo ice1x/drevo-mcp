@@ -69,6 +69,7 @@ cmd_start() {
     --user "$(id -u):$(id -g)" \
     -e DREVO_HOST=0.0.0.0 \
     -e DREVO_PORT=8080 \
+    -e DREVO_BOLT_PORT=7687 \
     -e DREVO_DATA_DIR=/data \
     -v "${DATA_DIR}:/data" \
     "$IMAGE" >/dev/null
@@ -80,7 +81,8 @@ cmd_start() {
       echo
       echo "  HTTP API : http://localhost:${PORT}"
       echo "  Web UI   : http://localhost:${PORT}/ui"
-      echo "  Point the MCP at it with: export DREVO_HTTP_URL=http://localhost:${PORT}"
+      echo "  Bolt     : bolt://localhost:${BOLT_PORT}"
+      echo "  Point the MCP at it with: export DREVO_BOLT_URL=bolt://localhost:${BOLT_PORT}"
       exit 0
     fi
     echo -n "."

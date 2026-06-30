@@ -36,6 +36,10 @@ services:
     environment:
       DREVO_HOST: "0.0.0.0"
       DREVO_PORT: "8080"
+      # Opt in to the Neo4j-compatible Bolt listener (published on 7687 above);
+      # the Bolt MCP in this repo connects over it. Without this the server
+      # only serves HTTP and 7687 stays closed.
+      DREVO_BOLT_PORT: "7687"
       DREVO_DATA_DIR: "/data"
     volumes:
       # Bind-mount a host folder (not a named volume): the redb file lives on
