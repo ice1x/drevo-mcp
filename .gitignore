@@ -10,3 +10,4 @@ __pycache__/
 # drevo container data (host bind-mount holding drevo.redb)
 /data/
 /.smoke-data/
+.venv-bolt/

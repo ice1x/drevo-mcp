@@ -40,7 +40,7 @@ jobs:
         run: black --check .
 
       - name: Type check (mypy --strict)
-        run: mypy --strict drevo_mcp/
+        run: mypy --strict drevo_mcp_bolt/
 
       - name: Lint shell script (shellcheck)
         run: shellcheck scripts/run-drevo.sh

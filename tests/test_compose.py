@@ -47,3 +47,9 @@ def test_compose_pulls_published_image() -> None:
 def test_compose_publishes_http_port() -> None:
     text = COMPOSE.read_text(encoding="utf-8")
     assert '"8080:8080"' in text, "compose must publish the HTTP API on 8080"
+
+
+def test_compose_publishes_bolt_port() -> None:
+    # The Bolt MCP connects over 7687, so the container must publish it.
+    text = COMPOSE.read_text(encoding="utf-8")
+    assert '"7687:7687"' in text, "compose must publish the Bolt port on 7687"
