@@ -9,15 +9,17 @@ container — the tool surface is the same.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, TypeVar
 
 from mcp.server.fastmcp import FastMCP
+from neo4j.exceptions import Neo4jError, ServiceUnavailable, SessionExpired
 
-from drevo_mcp_bolt.graph import KnowledgeGraph
+from drevo_mcp_bolt.graph import KnowledgeGraph, KnowledgeGraphError
 
 # ── Configuration ─────────────────────────────────────────────────────
 # Point at drevo's Bolt endpoint by default (the container sets
@@ -62,10 +64,49 @@ def _json(obj: Any) -> str:
     return json.dumps(obj, indent=2, default=default, ensure_ascii=False)
 
 
+def _error(message: str, error_type: str) -> str:
+    """A structured, machine-readable error envelope returned by every tool."""
+    return _json({"ok": False, "error": message, "error_type": error_type})
+
+
+_T = TypeVar("_T", bound=Callable[..., Awaitable[str]])
+
+
+def _guard(func: _T) -> _T:
+    """Turn failures into a clean JSON envelope instead of a raw exception.
+
+    Without this, a stopped drevo container (or a malformed Cypher query) raises
+    a driver exception that FastMCP surfaces as an ``isError`` tool result with
+    an opaque message. Here each failure becomes
+    ``{"ok": false, "error": ..., "error_type": ...}`` so a client/LLM can react:
+
+    - ``not_found``     — the targeted entity/relationship does not exist
+    - ``unavailable``   — the graph is unreachable (container down, network)
+    - ``query_error``   — the server rejected the query (bad Cypher, constraint)
+    - ``not_connected`` — the graph was never connected
+    """
+
+    @functools.wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> str:
+        try:
+            return await func(*args, **kwargs)
+        except KnowledgeGraphError as exc:
+            return _error(str(exc), "not_found")
+        except (ServiceUnavailable, SessionExpired) as exc:
+            return _error(f"knowledge graph unavailable: {exc}", "unavailable")
+        except Neo4jError as exc:
+            return _error(f"query failed: {exc}", "query_error")
+        except RuntimeError as exc:
+            return _error(str(exc), "not_connected")
+
+    return wrapper  # type: ignore[return-value]
+
+
 # ── Tools: Entities ───────────────────────────────────────────────────
 
 
 @mcp.tool()
+@_guard
 async def create_entity(
     name: str,
     entity_type: str,
@@ -79,6 +120,7 @@ async def create_entity(
 
 
 @mcp.tool()
+@_guard
 async def add_observations(name: str, project: str, observations: list[str]) -> str:
     """Append new observations to an existing entity."""
     result = await kg.add_observations(name, project, observations)
@@ -86,6 +128,7 @@ async def add_observations(name: str, project: str, observations: list[str]) -> 
 
 
 @mcp.tool()
+@_guard
 async def delete_entity(name: str, project: str) -> str:
     """Delete an entity and all its relationships."""
     deleted = await kg.delete_entity(name, project)
@@ -96,6 +139,7 @@ async def delete_entity(name: str, project: str) -> str:
 
 
 @mcp.tool()
+@_guard
 async def create_relationship(
     from_entity: str,
     to_entity: str,
@@ -111,6 +155,7 @@ async def create_relationship(
 
 
 @mcp.tool()
+@_guard
 async def delete_relationship(
     from_entity: str, to_entity: str, relation_type: str, project: str
 ) -> str:
@@ -123,6 +168,7 @@ async def delete_relationship(
 
 
 @mcp.tool()
+@_guard
 async def get_entity(name: str, project: str) -> str:
     """Get an entity with all its incoming and outgoing relationships."""
     result = await kg.get_entity(name, project)
@@ -130,6 +176,7 @@ async def get_entity(name: str, project: str) -> str:
 
 
 @mcp.tool()
+@_guard
 async def search_knowledge(query: str, project: str | None = None) -> str:
     """Search the knowledge graph by text (entity names and observations)."""
     results = await kg.search(query, project)
@@ -137,6 +184,7 @@ async def search_knowledge(query: str, project: str | None = None) -> str:
 
 
 @mcp.tool()
+@_guard
 async def get_project_graph(project: str) -> str:
     """Get the complete knowledge graph for a project."""
     result = await kg.get_project_graph(project)
@@ -144,6 +192,7 @@ async def get_project_graph(project: str) -> str:
 
 
 @mcp.tool()
+@_guard
 async def list_projects() -> str:
     """List all projects stored in the knowledge graph."""
     projects = await kg.list_projects()
@@ -154,6 +203,7 @@ async def list_projects() -> str:
 
 
 @mcp.tool()
+@_guard
 async def add_migration(
     project: str,
     description: str,
@@ -167,6 +217,7 @@ async def add_migration(
 
 
 @mcp.tool()
+@_guard
 async def get_migrations(project: str) -> str:
     """Get the full migration history for a project."""
     results = await kg.get_migrations(project)
@@ -174,6 +225,7 @@ async def get_migrations(project: str) -> str:
 
 
 @mcp.tool()
+@_guard
 async def apply_migration(project: str, seq: int) -> str:
     """Execute a pending migration and mark it as applied."""
     result = await kg.apply_migration(project, seq)
@@ -184,6 +236,7 @@ async def apply_migration(project: str, seq: int) -> str:
 
 
 @mcp.tool()
+@_guard
 async def run_cypher(query: str, params: dict[str, Any] | None = None) -> str:
     """Execute a Cypher query against the knowledge graph."""
     results = await kg.run_cypher(query, params)
