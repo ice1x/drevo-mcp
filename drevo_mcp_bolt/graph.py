@@ -14,6 +14,42 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from neo4j import AsyncDriver, AsyncGraphDatabase
+from neo4j.exceptions import ServiceUnavailable, SessionExpired
+
+
+class KnowledgeGraphError(Exception):
+    """Base for knowledge-graph domain errors (as opposed to driver errors)."""
+
+
+class EntityNotFoundError(KnowledgeGraphError):
+    """A mutation targeted an entity that does not exist."""
+
+    def __init__(self, name: str, project: str) -> None:
+        self.name = name
+        self.project = project
+        super().__init__(f"entity {name!r} not found in project {project!r}")
+
+
+class RelationshipEndpointsNotFoundError(KnowledgeGraphError):
+    """A relationship could not be created because an endpoint is missing."""
+
+    def __init__(self, from_entity: str, to_entity: str, project: str) -> None:
+        self.from_entity = from_entity
+        self.to_entity = to_entity
+        self.project = project
+        super().__init__(
+            "cannot create relationship: one or both entities missing in "
+            f"project {project!r} (from={from_entity!r}, to={to_entity!r})"
+        )
+
+
+class MigrationNotFoundError(KnowledgeGraphError):
+    """A migration to apply does not exist, or was already applied."""
+
+    def __init__(self, project: str, seq: int) -> None:
+        self.project = project
+        self.seq = seq
+        super().__init__(f"migration seq={seq} not found or already applied in project {project!r}")
 
 
 @dataclass
@@ -40,7 +76,15 @@ class KnowledgeGraph:
             self.uri,
             auth=(self.username, self.password),
         )
-        await self._driver.verify_connectivity()
+        # Best-effort: if the drevo container is down at launch, still start the
+        # server so it can come up and report a structured per-call error, rather
+        # than crashing the MCP process (which the client shows as "failed to
+        # start"). The driver is kept; each tool retries the connection and the
+        # server layer turns the failure into an "unavailable" envelope.
+        try:
+            await self._driver.verify_connectivity()
+        except (ServiceUnavailable, SessionExpired, OSError):
+            return
         await self._ensure_indexes()
 
     async def close(self) -> None:
@@ -119,7 +163,9 @@ class KnowledgeGraph:
         async with self._drv.session(database=self.database) as session:
             result = await session.run(query, name=name, project=project, observations=observations)
             record = await result.single()
-            return dict(record["entity"]) if record else {}
+            if not record:
+                raise EntityNotFoundError(name, project)
+            return dict(record["entity"])
 
     async def delete_entity(self, name: str, project: str) -> bool:
         """Delete an entity and all its relationships."""
@@ -166,7 +212,9 @@ class KnowledgeGraph:
                 properties=props,
             )
             record = await result.single()
-            return dict(record) if record else {}
+            if not record:
+                raise RelationshipEndpointsNotFoundError(from_entity, to_entity, project)
+            return dict(record)
 
     async def delete_relationship(
         self, from_entity: str, to_entity: str, relation_type: str, project: str
@@ -328,7 +376,7 @@ class KnowledgeGraph:
             result = await session.run(get_query, project=project, seq=seq)
             record = await result.single()
             if not record:
-                return {"error": "Migration not found or already applied"}
+                raise MigrationNotFoundError(project, seq)
 
             migration = dict(record["migration"])
             await session.run(migration["cypher_up"])
