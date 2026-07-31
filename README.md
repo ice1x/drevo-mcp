@@ -309,6 +309,15 @@ mirror `name` + `observations` into the drevo-indexed `body` field.
 |------|-----------|---------|
 | `fts_search` | `query`, `k=10` | Top-`k` nodes matching the text by BM25 score. |
 | `vector_search` | `label`, `prop`, `query`, `k=10` | Top-`k` nodes nearest to the `query` embedding on `label`.`prop`. |
+| `semantic_search` | `query`, `label`, `prop="embedding"`, `k=10`, `model=None` | Embed the `query` **text** via drevo's `/v1/embeddings`, then return the top-`k` nodes nearest that vector. Text-in, ranked-nodes-out. |
+
+`semantic_search` is the self-contained-RAG path: one drevo instance embeds the
+query **and** searches the graph, so no external embedder is needed. It calls
+drevo's OpenAI-compatible `POST {DREVO_HTTP_URL}/v1/embeddings` (drevo issue
+#217), so it requires drevo built with the `embeddings-proxy` feature and an
+upstream configured (`DREVO_EMBEDDINGS_UPSTREAM`); otherwise it returns an
+`embedding_error` envelope (drevo answered `503`). Set `DREVO_HTTP_URL`
+(default `http://localhost:8080`) to drevo's HTTP base.
 
 ### Migrations (write)
 

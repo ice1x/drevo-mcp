@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 from neo4j import AsyncDriver, AsyncGraphDatabase
 from neo4j.exceptions import ServiceUnavailable, SessionExpired
 
@@ -52,6 +53,16 @@ class MigrationNotFoundError(KnowledgeGraphError):
         super().__init__(f"migration seq={seq} not found or already applied in project {project!r}")
 
 
+class EmbeddingError(KnowledgeGraphError):
+    """Turning text into an embedding failed.
+
+    Raised by :meth:`KnowledgeGraph.embed_text` when drevo's OpenAI-compatible
+    ``POST /v1/embeddings`` (drevo issue #217) is unreachable, answers a non-2xx
+    status (notably ``503`` when the embeddings backend is not configured), or
+    returns a body this client cannot turn into a float vector.
+    """
+
+
 @dataclass
 class KnowledgeGraph:
     """Manages knowledge-graph operations against a Bolt server (drevo)."""
@@ -60,6 +71,11 @@ class KnowledgeGraph:
     username: str
     password: str
     database: str = "neo4j"
+    # drevo's HTTP API base (the OpenAI-compatible embeddings endpoint lives at
+    # ``{http_url}/v1/embeddings``). Separate from the Bolt ``uri`` because
+    # embedding generation is HTTP-only in drevo (issue #217).
+    http_url: str = "http://localhost:8080"
+    http_timeout: float = 30.0
     _driver: AsyncDriver | None = field(default=None, repr=False)
 
     @property
@@ -459,3 +475,68 @@ class KnowledgeGraph:
             return [
                 {"node": dict(record["node"]), "score": record["score"]} async for record in result
             ]
+
+    # ── Embeddings (drevo /v1/embeddings, issue #217) ─────────────────
+
+    async def embed_text(self, text: str, model: str | None = None) -> list[float]:
+        """Turn ``text`` into an embedding vector via drevo's OpenAI-compatible
+        ``POST /v1/embeddings``.
+
+        drevo proxies the request to its configured upstream (OpenAI / Voyage /
+        Ollama / …), so one drevo instance is the whole RAG backend. ``model``
+        is optional — when omitted, drevo fills in its configured default.
+
+        Requires drevo built with the ``embeddings-proxy`` feature and
+        ``DREVO_EMBEDDINGS_UPSTREAM`` set; otherwise drevo answers ``503`` and
+        this raises :class:`EmbeddingError`. Only float-vector responses are
+        supported (do not request ``encoding_format: "base64"``).
+        """
+        if not text:
+            raise EmbeddingError("cannot embed empty text")
+        payload: dict[str, Any] = {"input": text}
+        if model:
+            payload["model"] = model
+        url = f"{self.http_url.rstrip('/')}/v1/embeddings"
+        try:
+            async with httpx.AsyncClient(timeout=self.http_timeout) as client:
+                response = await client.post(url, json=payload)
+        except httpx.HTTPError as exc:
+            raise EmbeddingError(f"embeddings request to {url} failed: {exc}") from exc
+        if response.status_code == 503:
+            raise EmbeddingError(
+                "drevo embeddings backend not configured (503) — build drevo with "
+                "--features embeddings-proxy and set DREVO_EMBEDDINGS_UPSTREAM"
+            )
+        if response.status_code >= 400:
+            raise EmbeddingError(
+                f"embeddings upstream error {response.status_code}: {response.text[:200]}"
+            )
+        try:
+            vector = response.json()["data"][0]["embedding"]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise EmbeddingError(f"unexpected embeddings response shape: {exc}") from exc
+        if not isinstance(vector, list) or not all(isinstance(x, (int, float)) for x in vector):
+            raise EmbeddingError(
+                "embedding is not a float vector (base64 encoding_format is not "
+                "supported by semantic_search)"
+            )
+        return [float(x) for x in vector]
+
+    async def semantic_search(
+        self,
+        query: str,
+        label: str,
+        prop: str = "embedding",
+        k: int = 10,
+        model: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Embed ``query`` (via :meth:`embed_text`) then vector-search it against
+        ``label``.``prop`` (via :meth:`vector_search`).
+
+        Text-in, ranked-nodes-out: the self-contained RAG path where a single
+        drevo instance provides graph, vectors, **and** embedding generation.
+        Returns the top-``k`` nodes with their similarity ``score``, best-first
+        — each row ``{"node": {...}, "score": float}``.
+        """
+        vector = await self.embed_text(query, model=model)
+        return await self.vector_search(label, prop, vector, k)
