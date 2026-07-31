@@ -35,11 +35,20 @@ def test_script_has_bash_shebang_and_is_strict() -> None:
 
 def test_backfills_entity_body_for_fts() -> None:
     text = _text()
-    assert "MATCH (e:Entity)" in text, "must target every :Entity node"
+    assert "MATCH (e:Entity)" in text, "must target :Entity nodes"
     assert "SET e.body" in text, "must write the FTS-indexed `body` field"
     # body is derived from name + observations, so re-running is idempotent.
     assert "e.name" in text and "e.observations" in text, "body must mirror name + observations"
     assert "reduce(" in text, "observations (a list) must be joined into body text"
+
+
+def test_does_not_clobber_existing_body() -> None:
+    # Safety: only entities missing a body are backfilled, so already-indexed
+    # (e.g. natively-created) nodes keep their existing searchable text.
+    text = _text()
+    assert "WHERE e.body IS NULL OR e.body = ''" in text, (
+        "must guard on an empty/absent body so existing bodies are never overwritten"
+    )
 
 
 def test_targets_the_cypher_endpoint() -> None:

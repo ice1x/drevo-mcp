@@ -22,7 +22,13 @@ URL="${DREVO_HTTP_URL:-http://localhost:8080}/cypher"
 # Single-line Cypher (uses only single-quoted string literals, so it embeds in
 # JSON without any double-quote escaping). `reduce` joins the observations list;
 # `coalesce` handles entities that have none.
-QUERY="MATCH (e:Entity) SET e.body = e.name + ' ' + reduce(acc = '', o IN coalesce(e.observations, []) | acc + ' ' + o) RETURN count(e) AS migrated"
+#
+# The WHERE guard makes this SAFE and idempotent: it only backfills entities
+# that have no `body` yet (the ones written via Cypher, which drevo never
+# FTS-indexed). Entities that already carry a `body` — e.g. natively-created
+# nodes that are already searchable — are left untouched, so their existing
+# indexed text is never clobbered.
+QUERY="MATCH (e:Entity) WHERE e.body IS NULL OR e.body = '' SET e.body = e.name + ' ' + reduce(acc = '', o IN coalesce(e.observations, []) | acc + ' ' + o) RETURN count(e) AS migrated"
 
 command -v curl >/dev/null 2>&1 || { echo "backfill: curl not found on PATH" >&2; exit 1; }
 
