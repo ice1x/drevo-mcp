@@ -46,9 +46,9 @@ def test_does_not_clobber_existing_body() -> None:
     # Safety: only entities missing a body are backfilled, so already-indexed
     # (e.g. natively-created) nodes keep their existing searchable text.
     text = _text()
-    assert "WHERE e.body IS NULL OR e.body = ''" in text, (
-        "must guard on an empty/absent body so existing bodies are never overwritten"
-    )
+    assert (
+        "WHERE e.body IS NULL OR e.body = ''" in text
+    ), "must guard on an empty/absent body so existing bodies are never overwritten"
 
 
 def test_targets_the_cypher_endpoint() -> None:
