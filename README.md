@@ -297,6 +297,19 @@ signatures, so clients discover arguments via `tools/list`.
 | `get_project_graph` | `project` | The full entity/relationship graph for a project. |
 | `list_projects` | — | All distinct project namespaces. |
 
+### Scored search (read)
+
+Ranked retrieval over drevo's `CALL fts.search` (BM25 full-text) and
+`CALL drevo.vector.query` (vector ANN) procedures. Each row is
+`{"node": {...}, "score": <float>}`, ordered best-first. Entities written
+through this MCP are searchable because `create_entity` / `add_observations`
+mirror `name` + `observations` into the drevo-indexed `body` field.
+
+| Tool | Arguments | Returns |
+|------|-----------|---------|
+| `fts_search` | `query`, `k=10` | Top-`k` nodes matching the text by BM25 score. |
+| `vector_search` | `label`, `prop`, `query`, `k=10` | Top-`k` nodes nearest to the `query` embedding on `label`.`prop`. |
+
 ### Migrations (write)
 
 | Tool | Arguments | Effect |

@@ -121,7 +121,16 @@ class KnowledgeGraph:
         observations: list[str] | None = None,
         properties: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Create or merge an entity node in the knowledge graph."""
+        """Create or merge an entity node in the knowledge graph.
+
+        drevo's full-text index (``CALL fts.search``) indexes a node's
+        ``title`` + ``body``, **not** its arbitrary properties — so the
+        ``name`` / ``observations`` we store would be invisible to search. We
+        mirror them into ``body`` on every write to make entities discoverable
+        via ``fts_search``. ``title`` is deliberately left unset: drevo enforces
+        title uniqueness, which ``name`` (unique only *per project*) would
+        violate.
+        """
         props = properties or {}
         obs = observations or []
         query = """
@@ -136,6 +145,7 @@ class KnowledgeGraph:
             e.observations = e.observations + $observations,
             e.updated_at = datetime()
         SET e += $properties
+        SET e.body = e.name + ' ' + reduce(acc = '', o IN coalesce(e.observations, []) | acc + ' ' + o)
         RETURN e{.*, labels: labels(e)} AS entity
         """
         async with self._drv.session(database=self.database) as session:
@@ -153,11 +163,16 @@ class KnowledgeGraph:
     async def add_observations(
         self, name: str, project: str, observations: list[str]
     ) -> dict[str, Any]:
-        """Append observations to an existing entity."""
+        """Append observations to an existing entity.
+
+        Also refreshes the ``body`` mirror so the new observations become
+        full-text searchable (see :meth:`create_entity`).
+        """
         query = """
         MATCH (e:Entity {name: $name, project: $project})
         SET e.observations = e.observations + $observations,
             e.updated_at = datetime()
+        SET e.body = e.name + ' ' + reduce(acc = '', o IN coalesce(e.observations, []) | acc + ' ' + o)
         RETURN e{.*, labels: labels(e)} AS entity
         """
         async with self._drv.session(database=self.database) as session:
@@ -398,3 +413,49 @@ class KnowledgeGraph:
         async with self._drv.session(database=self.database) as session:
             result = await session.run(query, parameters=params or {})
             return [dict(record) async for record in result]
+
+    # ── Scored search ─────────────────────────────────────────────────
+
+    async def vector_search(
+        self, label: str, prop: str, query: list[float], k: int = 10
+    ) -> list[dict[str, Any]]:
+        """Scored approximate-nearest-neighbour search over an embedding property.
+
+        Wraps drevo's ``CALL drevo.vector.query(label, property, query, k)``
+        procedure (drevo issue #202): ``label``/``prop`` select the node label
+        and its embedding property, ``query`` is the query vector, ``k`` the
+        number of neighbours. Returns the top-``k`` nodes with their similarity
+        ``score``, best-first — each row ``{"node": {...}, "score": float}``.
+        """
+        cypher = """
+        CALL drevo.vector.query($label, $prop, $query, $k) YIELD node, score
+        RETURN node{.*, labels: labels(node)} AS node, score
+        ORDER BY score DESC
+        """
+        async with self._drv.session(database=self.database) as session:
+            result = await session.run(
+                cypher,
+                parameters={"label": label, "prop": prop, "query": query, "k": k},
+            )
+            return [
+                {"node": dict(record["node"]), "score": record["score"]} async for record in result
+            ]
+
+    async def fts_search(self, query: str, k: int = 10) -> list[dict[str, Any]]:
+        """Scored BM25 full-text search over indexed node text.
+
+        Wraps drevo's ``CALL fts.search(query, k)`` procedure (drevo issue
+        #208): ``query`` is the search text, ``k`` the number of results.
+        Returns the top-``k`` matching nodes with their BM25 ``score``,
+        best-first — each row ``{"node": {...}, "score": float}``.
+        """
+        cypher = """
+        CALL fts.search($query, $k) YIELD node, score
+        RETURN node{.*, labels: labels(node)} AS node, score
+        ORDER BY score DESC
+        """
+        async with self._drv.session(database=self.database) as session:
+            result = await session.run(cypher, parameters={"query": query, "k": k})
+            return [
+                {"node": dict(record["node"]), "score": record["score"]} async for record in result
+            ]
