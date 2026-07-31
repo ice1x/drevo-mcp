@@ -19,7 +19,7 @@ from typing import Any, TypeVar
 from mcp.server.fastmcp import FastMCP
 from neo4j.exceptions import Neo4jError, ServiceUnavailable, SessionExpired
 
-from drevo_mcp_bolt.graph import KnowledgeGraph, KnowledgeGraphError
+from drevo_mcp_bolt.graph import EmbeddingError, KnowledgeGraph, KnowledgeGraphError
 
 # ── Configuration ─────────────────────────────────────────────────────
 # Point at drevo's Bolt endpoint by default (the container sets
@@ -30,8 +30,18 @@ _BOLT_URI = os.getenv("DREVO_BOLT_URL", "bolt://localhost:7687")
 _BOLT_USER = os.getenv("DREVO_BOLT_USER", "neo4j")
 _BOLT_PASS = os.getenv("DREVO_BOLT_PASSWORD", "drevo")
 _BOLT_DB = os.getenv("DREVO_BOLT_DATABASE", "neo4j")
+# drevo's HTTP API base — used by `semantic_search` to reach the OpenAI-compatible
+# `/v1/embeddings` endpoint (issue #217). Separate from Bolt because embedding
+# generation is HTTP-only in drevo.
+_HTTP_URL = os.getenv("DREVO_HTTP_URL", "http://localhost:8080")
 
-kg = KnowledgeGraph(uri=_BOLT_URI, username=_BOLT_USER, password=_BOLT_PASS, database=_BOLT_DB)
+kg = KnowledgeGraph(
+    uri=_BOLT_URI,
+    username=_BOLT_USER,
+    password=_BOLT_PASS,
+    database=_BOLT_DB,
+    http_url=_HTTP_URL,
+)
 
 
 @asynccontextmanager
@@ -80,16 +90,21 @@ def _guard(func: _T) -> _T:
     an opaque message. Here each failure becomes
     ``{"ok": false, "error": ..., "error_type": ...}`` so a client/LLM can react:
 
-    - ``not_found``     — the targeted entity/relationship does not exist
-    - ``unavailable``   — the graph is unreachable (container down, network)
-    - ``query_error``   — the server rejected the query (bad Cypher, constraint)
-    - ``not_connected`` — the graph was never connected
+    - ``not_found``       — the targeted entity/relationship does not exist
+    - ``embedding_error`` — text-to-vector embedding failed (drevo /v1/embeddings
+      unreachable, not configured (503), or a non-float response)
+    - ``unavailable``     — the graph is unreachable (container down, network)
+    - ``query_error``     — the server rejected the query (bad Cypher, constraint)
+    - ``not_connected``   — the graph was never connected
     """
 
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> str:
         try:
             return await func(*args, **kwargs)
+        except EmbeddingError as exc:
+            # Must precede KnowledgeGraphError — EmbeddingError subclasses it.
+            return _error(str(exc), "embedding_error")
         except KnowledgeGraphError as exc:
             return _error(str(exc), "not_found")
         except (ServiceUnavailable, SessionExpired) as exc:
@@ -273,6 +288,27 @@ async def fts_search(query: str, k: int = 10) -> str:
     return _json(results)
 
 
+@mcp.tool()
+@_guard
+async def semantic_search(
+    query: str, label: str, prop: str = "embedding", k: int = 10, model: str | None = None
+) -> str:
+    """Semantic search: embed `query` with drevo's own `/v1/embeddings`, then
+    return the top-`k` nodes nearest that vector under `label`.`prop`.
+
+    Text-in, ranked-nodes-out — the self-contained RAG path where one drevo
+    instance provides graph, vectors, and embedding generation. `prop` is the
+    embedding property (default `embedding`); `model` is optional (drevo fills
+    its configured default when omitted). Returns `[{"node": {...}, "score":
+    float}]`, best-first.
+
+    Requires drevo built with the `embeddings-proxy` feature and an upstream
+    configured; otherwise it reports an `embedding_error` (drevo answered 503).
+    """
+    results = await kg.semantic_search(query, label, prop, k, model)
+    return _json(results)
+
+
 # ── Entrypoint ────────────────────────────────────────────────────────
 
 
@@ -282,6 +318,9 @@ def main() -> None:
     parser.add_argument("--username", default=_BOLT_USER)
     parser.add_argument("--password", default=_BOLT_PASS)
     parser.add_argument("--database", default=_BOLT_DB)
+    parser.add_argument(
+        "--http-url", default=_HTTP_URL, help="drevo HTTP base for /v1/embeddings (semantic_search)"
+    )
     parser.add_argument("--transport", default="stdio", choices=["stdio", "sse", "streamable-http"])
     args = parser.parse_args()
 
@@ -289,6 +328,7 @@ def main() -> None:
     kg.username = args.username
     kg.password = args.password
     kg.database = args.database
+    kg.http_url = args.http_url
 
     mcp.run(transport=args.transport)
 

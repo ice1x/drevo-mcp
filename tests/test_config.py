@@ -33,6 +33,7 @@ EXPECTED_TOOLS = {
     "run_cypher",
     "vector_search",
     "fts_search",
+    "semantic_search",
 }
 
 
