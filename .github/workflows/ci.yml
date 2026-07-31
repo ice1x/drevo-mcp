@@ -43,7 +43,7 @@ jobs:
         run: mypy --strict drevo_mcp_bolt/
 
       - name: Lint shell script (shellcheck)
-        run: shellcheck scripts/run-drevo.sh
+        run: shellcheck scripts/*.sh
 
       - name: Tests (pytest)
         run: pytest -q
