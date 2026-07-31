@@ -31,6 +31,8 @@ EXPECTED_TOOLS = {
     "get_migrations",
     "apply_migration",
     "run_cypher",
+    "vector_search",
+    "fts_search",
 }
 
 

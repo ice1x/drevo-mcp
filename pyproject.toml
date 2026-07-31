@@ -20,15 +20,24 @@ classifiers = [
 ]
 # Talks Bolt to a running drevo-server (DREVO_BOLT_PORT) or a real Neo4j —
 # the official `neo4j` driver, plus the MCP SDK's FastMCP. No drevo dependency.
-dependencies = ["mcp>=1.2", "neo4j>=5,<6"]
+# `mcp` is pinned: the unbounded `mcp>=1.2` let CI install a newer release in
+# which mypy can no longer resolve `mcp.server.fastmcp` (the FastMCP import this
+# server is built on), turning every `@mcp.tool()` into an untyped-decorator
+# error — and risking a runtime ImportError. Pin to the version the gates pass
+# on; bump deliberately after re-checking the FastMCP import path.
+dependencies = ["mcp==1.28.1", "neo4j>=5,<6"]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7",
     "pytest-asyncio>=0.23",
-    "mypy>=1.10",
-    "ruff>=0.5",
-    "black>=24",
+    # Lint/format/type-check tools are PINNED: their default rule sets drift
+    # between releases, which reddens CI on unchanged code (a `ruff check .`
+    # with no explicit `select` inherits ruff's evolving defaults). Bump these
+    # deliberately, re-running the gates, rather than tracking `latest`.
+    "mypy==2.1.0",
+    "ruff==0.15.20",
+    "black==26.5.1",
     "faker>=24",
 ]
 

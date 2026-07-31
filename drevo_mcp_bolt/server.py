@@ -243,6 +243,36 @@ async def run_cypher(query: str, params: dict[str, Any] | None = None) -> str:
     return _json(results)
 
 
+# ── Tools: Scored search ──────────────────────────────────────────────
+
+
+@mcp.tool()
+@_guard
+async def vector_search(label: str, prop: str, query: list[float], k: int = 10) -> str:
+    """Scored vector search: the top-`k` nodes nearest to an embedding.
+
+    Wraps drevo's `CALL drevo.vector.query`. `label` / `prop` select the node
+    label and its embedding property, `query` is the query vector, `k` the
+    number of neighbours. Returns `[{"node": {...}, "score": float}]`,
+    ordered best-first — first-class scored retrieval without hand-writing
+    Cypher.
+    """
+    results = await kg.vector_search(label, prop, query, k)
+    return _json(results)
+
+
+@mcp.tool()
+@_guard
+async def fts_search(query: str, k: int = 10) -> str:
+    """Scored full-text search: the top-`k` nodes matching the query text (BM25).
+
+    Wraps drevo's `CALL fts.search`. `query` is the search text, `k` the number
+    of results. Returns `[{"node": {...}, "score": float}]`, ordered best-first.
+    """
+    results = await kg.fts_search(query, k)
+    return _json(results)
+
+
 # ── Entrypoint ────────────────────────────────────────────────────────
 
 
