@@ -76,17 +76,49 @@ docker run -d --name "$NAME" \
   "$IMAGE" >/dev/null
 
 echo -n "Waiting for http://localhost:${PORT}/health "
+healthy=0
 for _ in $(seq 1 30); do
   if curl -fsS "http://localhost:${PORT}/health" >/dev/null 2>&1; then
     echo "OK"
-    echo "  HTTP : http://localhost:${PORT}"
-    echo "  Bolt : bolt://localhost:${BOLT_PORT}   (point the MCP's DREVO_BOLT_URL here)"
-    echo "  Data : ${DATA_DIR}"
-    exit 0
+    healthy=1
+    break
   fi
   echo -n "."
   sleep 1
 done
-echo
-echo "restart-drevo: container did not become healthy within 30s — check: docker logs ${NAME}" >&2
-exit 1
+if [ "$healthy" -ne 1 ]; then
+  echo
+  echo "restart-drevo: container did not become healthy within 30s — check: docker logs ${NAME}" >&2
+  exit 1
+fi
+
+# Fail fast: when embeddings are configured, verify the upstream + key actually
+# work with ONE tiny (~1-token) request — so a bad/expired key surfaces here at
+# restart, not silently later. Skipped when embeddings are not configured. The
+# request goes to the LOCAL drevo (the key lives inside the container), so no
+# secret is placed on this command line.
+if [ -n "${DREVO_EMBEDDINGS_UPSTREAM:-}" ] && [ -n "${DREVO_EMBEDDINGS_API_KEY:-}" ]; then
+  printf 'Checking embeddings key … '
+  _tmp="$(mktemp)"
+  _code="$(curl -s -o "$_tmp" -w '%{http_code}' \
+    -X POST "http://localhost:${PORT}/v1/embeddings" \
+    -H 'content-type: application/json' -d '{"input":"ping"}' 2>/dev/null || echo 000)"
+  if [ "$_code" = "200" ] && grep -q '"embedding"' "$_tmp"; then
+    echo "OK"
+    rm -f "$_tmp"
+  else
+    echo "FAILED (HTTP ${_code})"
+    # Scrub anything key-shaped before showing the upstream error body.
+    sed 's/sk-[A-Za-z0-9_-]*/sk-***REDACTED***/g' "$_tmp" | head -c 300 >&2
+    echo >&2
+    rm -f "$_tmp"
+    echo "restart-drevo: drevo is UP, but /v1/embeddings did not return an embedding —" >&2
+    echo "  check DREVO_EMBEDDINGS_API_KEY / upstream in ${ENV_FILE}." >&2
+    exit 1
+  fi
+fi
+
+echo "  HTTP : http://localhost:${PORT}"
+echo "  Bolt : bolt://localhost:${BOLT_PORT}   (point the MCP's DREVO_BOLT_URL here)"
+echo "  Data : ${DATA_DIR}"
+exit 0
