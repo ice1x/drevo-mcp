@@ -15,6 +15,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "restart-drevo.sh"
+ENV_EXAMPLE = REPO_ROOT / ".drevo.env.example"
 
 
 def _text() -> str:
@@ -51,3 +52,34 @@ def test_env_var_surface_matches_run_drevo() -> None:
     text = _text()
     for var in ("DREVO_NAME", "DREVO_PORT", "DREVO_BOLT_PORT", "DREVO_DATA_DIR"):
         assert var in text, f"restart-drevo.sh must honour {var} (as run-drevo.sh does)"
+
+
+def test_sources_a_single_config_file() -> None:
+    # A one-file config (~/.drevo.env, overridable via DREVO_ENV_FILE) makes a
+    # normal restart a single bare command. It is sourced before defaults apply.
+    text = _text()
+    assert "DREVO_ENV_FILE" in text, "must support a DREVO_ENV_FILE config path"
+    assert ".drevo.env" in text, "must default the config file to ~/.drevo.env"
+    assert '. "$ENV_FILE"' in text, "must source the config file"
+
+
+def test_forwards_embeddings_proxy_config_when_set() -> None:
+    # The embeddings-proxy env (issue #217) must be forwarded into the container
+    # when set, so POST /v1/embeddings works; a no-op when unset.
+    text = _text()
+    for var in (
+        "DREVO_EMBEDDINGS_UPSTREAM",
+        "DREVO_EMBEDDINGS_API_KEY",
+        "DREVO_EMBEDDINGS_MODEL",
+    ):
+        assert var in text, f"restart-drevo.sh must forward {var} into the container"
+
+
+def test_env_example_exists_without_a_real_key() -> None:
+    # A key-less example is the only .drevo.env that belongs in git; the real
+    # one (with the API key) stays out of the repo.
+    assert ENV_EXAMPLE.is_file(), "a .drevo.env.example must ship for reference"
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    assert "DREVO_EMBEDDINGS_UPSTREAM" in text and "DREVO_EMBEDDINGS_API_KEY" in text
+    # The example must carry a placeholder, never a real-looking secret.
+    assert "REPLACE_ME" in text, "the example key must be an obvious placeholder"
