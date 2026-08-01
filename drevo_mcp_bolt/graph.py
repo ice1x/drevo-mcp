@@ -529,6 +529,7 @@ class KnowledgeGraph:
         prop: str = "embedding",
         k: int = 10,
         model: str | None = None,
+        fallback_to_fts: bool = True,
     ) -> list[dict[str, Any]]:
         """Embed ``query`` (via :meth:`embed_text`) then vector-search it against
         ``label``.``prop`` (via :meth:`vector_search`).
@@ -537,6 +538,20 @@ class KnowledgeGraph:
         drevo instance provides graph, vectors, **and** embedding generation.
         Returns the top-``k`` nodes with their similarity ``score``, best-first
         — each row ``{"node": {...}, "score": float}``.
+
+        **Graceful degradation without an LLM:** when embedding generation is
+        unavailable (drevo's ``/v1/embeddings`` not configured → 503, or the
+        upstream errored), and ``fallback_to_fts`` is set (the default), this
+        transparently falls back to :meth:`fts_search` — lexical BM25 search over
+        the query text — so you still get relevant nodes without an embedder.
+        Note the scope differs: the fallback searches indexed node text
+        (title/body) across the graph, not ``label``.``prop`` embeddings. Set
+        ``fallback_to_fts=False`` to surface the :class:`EmbeddingError` instead.
         """
-        vector = await self.embed_text(query, model=model)
+        try:
+            vector = await self.embed_text(query, model=model)
+        except EmbeddingError:
+            if fallback_to_fts:
+                return await self.fts_search(query, k)
+            raise
         return await self.vector_search(label, prop, vector, k)

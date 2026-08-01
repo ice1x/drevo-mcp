@@ -156,15 +156,63 @@ async def test_semantic_search_embeds_then_vector_searches(
     assert calls["vs"] == ("Entity", "embedding", [0.1, 0.2], 5)
 
 
+async def test_semantic_search_falls_back_to_fts_when_embeddings_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Works without an LLM: a 503/upstream failure degrades to lexical BM25.
+    kg = _kg()
+    calls: dict[str, Any] = {}
+
+    async def boom_embed(text: str, model: str | None = None) -> list[float]:
+        raise EmbeddingError("drevo embeddings backend not configured (503)")
+
+    async def fake_fts(query: str, k: int) -> list[dict[str, Any]]:
+        calls["fts"] = (query, k)
+        return [{"node": {"name": "lex"}, "score": 3.1}]
+
+    monkeypatch.setattr(kg, "embed_text", boom_embed)
+    monkeypatch.setattr(kg, "fts_search", fake_fts)
+
+    out = await kg.semantic_search("find me", "Entity", "embedding", 7)
+    assert out == [{"node": {"name": "lex"}, "score": 3.1}]
+    assert calls["fts"] == ("find me", 7)  # query + k forwarded to FTS
+
+
+async def test_semantic_search_reraises_when_fallback_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kg = _kg()
+
+    async def boom_embed(text: str, model: str | None = None) -> list[float]:
+        raise EmbeddingError("not configured")
+
+    monkeypatch.setattr(kg, "embed_text", boom_embed)
+    with pytest.raises(EmbeddingError):
+        await kg.semantic_search("q", "Entity", fallback_to_fts=False)
+
+
 # ── server layer: the MCP tool ────────────────────────────────────────
 
 
 def test_semantic_search_tool_returns_scored_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     class _KG:
         async def semantic_search(
-            self, query: str, label: str, prop: str, k: int, model: str | None
+            self,
+            query: str,
+            label: str,
+            prop: str,
+            k: int,
+            model: str | None,
+            fallback_to_fts: bool,
         ) -> list[dict[str, Any]]:
-            assert (query, label, prop, k, model) == ("q", "Entity", "embedding", 10, None)
+            assert (query, label, prop, k, model, fallback_to_fts) == (
+                "q",
+                "Entity",
+                "embedding",
+                10,
+                None,
+                True,
+            )
             return [{"node": {"name": "a"}, "score": 0.9}]
 
     monkeypatch.setattr(server, "kg", _KG())

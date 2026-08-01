@@ -291,7 +291,12 @@ async def fts_search(query: str, k: int = 10) -> str:
 @mcp.tool()
 @_guard
 async def semantic_search(
-    query: str, label: str, prop: str = "embedding", k: int = 10, model: str | None = None
+    query: str,
+    label: str,
+    prop: str = "embedding",
+    k: int = 10,
+    model: str | None = None,
+    fallback_to_fts: bool = True,
 ) -> str:
     """Semantic search: embed `query` with drevo's own `/v1/embeddings`, then
     return the top-`k` nodes nearest that vector under `label`.`prop`.
@@ -302,10 +307,14 @@ async def semantic_search(
     its configured default when omitted). Returns `[{"node": {...}, "score":
     float}]`, best-first.
 
-    Requires drevo built with the `embeddings-proxy` feature and an upstream
-    configured; otherwise it reports an `embedding_error` (drevo answered 503).
+    Works without an LLM: if embeddings are not configured (drevo answers 503)
+    or the upstream errors, and `fallback_to_fts` is set (the default), this
+    transparently degrades to `fts_search` — lexical BM25 over the query text —
+    so you still get relevant nodes. The fallback searches indexed node text
+    (title/body) graph-wide, not `label`.`prop` embeddings. Set
+    `fallback_to_fts=false` to get an `embedding_error` instead.
     """
-    results = await kg.semantic_search(query, label, prop, k, model)
+    results = await kg.semantic_search(query, label, prop, k, model, fallback_to_fts)
     return _json(results)
 
 

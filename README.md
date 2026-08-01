@@ -309,15 +309,21 @@ mirror `name` + `observations` into the drevo-indexed `body` field.
 |------|-----------|---------|
 | `fts_search` | `query`, `k=10` | Top-`k` nodes matching the text by BM25 score. |
 | `vector_search` | `label`, `prop`, `query`, `k=10` | Top-`k` nodes nearest to the `query` embedding on `label`.`prop`. |
-| `semantic_search` | `query`, `label`, `prop="embedding"`, `k=10`, `model=None` | Embed the `query` **text** via drevo's `/v1/embeddings`, then return the top-`k` nodes nearest that vector. Text-in, ranked-nodes-out. |
+| `semantic_search` | `query`, `label`, `prop="embedding"`, `k=10`, `model=None`, `fallback_to_fts=True` | Embed the `query` **text** via drevo's `/v1/embeddings`, then return the top-`k` nodes nearest that vector. Text-in, ranked-nodes-out. Falls back to `fts_search` when embeddings are unavailable. |
 
 `semantic_search` is the self-contained-RAG path: one drevo instance embeds the
 query **and** searches the graph, so no external embedder is needed. It calls
 drevo's OpenAI-compatible `POST {DREVO_HTTP_URL}/v1/embeddings` (drevo issue
-#217), so it requires drevo built with the `embeddings-proxy` feature and an
-upstream configured (`DREVO_EMBEDDINGS_UPSTREAM`); otherwise it returns an
-`embedding_error` envelope (drevo answered `503`). Set `DREVO_HTTP_URL`
+#217). It requires drevo built with the `embeddings-proxy` feature and an
+upstream configured (`DREVO_EMBEDDINGS_UPSTREAM`). Set `DREVO_HTTP_URL`
 (default `http://localhost:8080`) to drevo's HTTP base.
+
+**Works without an LLM:** when embeddings are not configured (drevo answers
+`503`) or the upstream errors, `semantic_search` transparently degrades to
+`fts_search` (lexical BM25 over the query text) so you still get relevant nodes
+— the fallback searches indexed node text graph-wide rather than
+`label`.`prop` embeddings. Pass `fallback_to_fts=false` to get an
+`embedding_error` envelope instead.
 
 ### Migrations (write)
 
