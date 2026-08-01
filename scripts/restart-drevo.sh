@@ -21,7 +21,22 @@
 # DREVO_BOLT_URL points at. If the MCP connects to bolt://localhost:7688, run:
 #   DREVO_BOLT_PORT=7688 DREVO_DATA_DIR=~/drevo_data ./scripts/restart-drevo.sh
 #
+# Persistent config file (so a normal restart is a SINGLE bare command): all of
+# the above vars — plus the embeddings-proxy config and its API key — can live
+# in ~/.drevo.env (see .drevo.env.example; chmod 600 it). It is sourced first,
+# so `./scripts/restart-drevo.sh` alone brings drevo up with your config.
+# Override the path with DREVO_ENV_FILE.
+#
 set -euo pipefail
+
+# Load ~/.drevo.env (or $DREVO_ENV_FILE) if present, before defaults are applied.
+ENV_FILE="${DREVO_ENV_FILE:-$HOME/.drevo.env}"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
 
 NAME="${DREVO_NAME:-drevo}"
 IMAGE="${DREVO_IMAGE:-ice1x/drevo:${DREVO_TAG:-latest}}"
@@ -35,6 +50,17 @@ docker info >/dev/null 2>&1 || { echo "restart-drevo: docker daemon unreachable 
 mkdir -p "$DATA_DIR"
 DATA_DIR="$(cd "$DATA_DIR" && pwd)"
 
+# Forward the embeddings-proxy config (issue #217) into the container when set,
+# so POST /v1/embeddings works. No-op (endpoint stays 503) when unset. Requires
+# an image built with the `embeddings-proxy` feature — the deploy image ships it
+# by default. The upstream is taken ONLY from config, never from a request
+# (SSRF boundary — OWASP A10).
+EMB_ENV=()
+for _v in DREVO_EMBEDDINGS_UPSTREAM DREVO_EMBEDDINGS_API_KEY DREVO_EMBEDDINGS_MODEL; do
+  [ -n "${!_v:-}" ] && EMB_ENV+=(-e "${_v}=${!_v}")
+done
+[ "${#EMB_ENV[@]}" -gt 0 ] && echo "embeddings proxy: forwarding ${DREVO_EMBEDDINGS_UPSTREAM:-<upstream unset>}"
+
 echo "Recreating '$NAME' from $IMAGE  (HTTP :$PORT, Bolt :$BOLT_PORT, data $DATA_DIR) …"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
@@ -45,6 +71,7 @@ docker run -d --name "$NAME" \
   -e DREVO_PORT=8080 \
   -e DREVO_BOLT_PORT=7687 \
   -e DREVO_DATA_DIR=/data \
+  ${EMB_ENV[@]+"${EMB_ENV[@]}"} \
   -v "${DATA_DIR}:/data" \
   "$IMAGE" >/dev/null
 
