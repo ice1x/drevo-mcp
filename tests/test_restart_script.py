@@ -75,6 +75,15 @@ def test_forwards_embeddings_proxy_config_when_set() -> None:
         assert var in text, f"restart-drevo.sh must forward {var} into the container"
 
 
+def test_verifies_embeddings_key_with_a_cheap_request() -> None:
+    # Fail-fast: once healthy, a tiny /v1/embeddings request proves the key works
+    # (or exits non-zero). The check must scrub key-shaped tokens from any error.
+    text = _text()
+    assert "/v1/embeddings" in text, "must probe /v1/embeddings to verify the key"
+    assert '"input":"ping"' in text, "must send a tiny (~1-token) embedding request"
+    assert "REDACTED" in text, "must scrub key-shaped tokens before printing an error"
+
+
 def test_env_example_exists_without_a_real_key() -> None:
     # A key-less example is the only .drevo.env that belongs in git; the real
     # one (with the API key) stays out of the repo.
