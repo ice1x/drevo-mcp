@@ -38,7 +38,16 @@ def test_script_is_valid_python() -> None:
 def test_targets_entity_and_writes_embedding_property() -> None:
     text = _text()
     assert "MATCH (n:{LABEL})" in text or "n:Entity" in text, "must target :Entity nodes"
-    assert "SET n.{PROP}=r.vec" in text, "must write the embedding vector property"
+    assert "SET n.{PROP}=" in text, "must write the embedding vector property"
+
+
+def test_writes_are_resilient() -> None:
+    # drevo's Bolt intermittently fails a managed execute_write over a large
+    # UNWIND batch ("no active transaction"); the script must write robustly.
+    text = _text()
+    assert "def write_one" in text, "per-node write helper expected"
+    assert "session.run(" in text, "must write via an autocommit session.run"
+    assert "range(6)" in text or "retry" in text.lower(), "must retry transient failures"
 
 
 def test_is_idempotent_via_null_guard() -> None:
