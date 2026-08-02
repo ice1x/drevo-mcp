@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 import httpx
 from neo4j import GraphDatabase
@@ -62,6 +63,29 @@ def embed(texts):
     return [d["embedding"] for d in data]
 
 
+def write_one(session, node_id, vec) -> None:
+    """Write one node's vector with an AUTOCOMMIT statement, retrying on a
+    transient Bolt failure.
+
+    Deliberately not a managed ``execute_write`` transaction over a large
+    ``UNWIND`` batch: drevo's Bolt server intermittently fails that path with
+    ``Neo.DatabaseError.Statement.ExecutionFailed: no active transaction`` on a
+    big parameter payload (32 nodes x 1536 floats). One autocommit ``SET`` per
+    node — the pattern the MCP itself uses — plus a short backoff retry is
+    robust across the full graph.
+    """
+    for attempt in range(6):
+        try:
+            session.run(
+                f"MATCH (n) WHERE id(n)=$id SET n.{PROP}=$vec", id=node_id, vec=vec
+            ).consume()
+            return
+        except Exception:  # noqa: BLE001 — transient Bolt tx error; back off and retry.
+            if attempt == 5:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+
+
 def main() -> int:
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 0
     driver = GraphDatabase.driver(BOLT)
@@ -73,13 +97,8 @@ def main() -> int:
             for i in range(0, len(nodes), BATCH):
                 chunk = nodes[i : i + BATCH]
                 vecs = embed([t for _, t in chunk])
-                rows = [{"id": nid, "vec": v} for (nid, _), v in zip(chunk, vecs)]
-                session.execute_write(
-                    lambda tx, rows=rows: tx.run(
-                        f"UNWIND $rows AS r MATCH (n) WHERE id(n)=r.id SET n.{PROP}=r.vec",
-                        rows=rows,
-                    ).consume()
-                )
+                for (node_id, _), vec in zip(chunk, vecs):
+                    write_one(session, node_id, vec)
                 done += len(chunk)
                 print(f"  embedded {done}/{len(nodes)}")
         print("done")
