@@ -17,6 +17,29 @@ import httpx
 from neo4j import AsyncDriver, AsyncGraphDatabase
 from neo4j.exceptions import ServiceUnavailable, SessionExpired
 
+# A numeric list at least this long is an embedding vector, not real graph
+# data — drop it from returned nodes so tool results don't balloon (a single
+# 1536-float embedding is ~30 KB of JSON per node). The vector is still used
+# server-side by `drevo.vector.query`; callers just don't need it echoed back.
+_VECTOR_MIN_LEN = 64
+
+
+def _is_vector(value: Any) -> bool:
+    """True when ``value`` looks like an embedding: a long list of numbers
+    (booleans excluded — ``bool`` is an ``int`` subclass but never a vector)."""
+    return (
+        isinstance(value, list)
+        and len(value) >= _VECTOR_MIN_LEN
+        and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in value)
+    )
+
+
+def _strip_vectors(node: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``node`` without embedding-like vector properties, so a
+    node projected with ``.*`` doesn't echo its 1536-float ``embedding`` back to
+    the caller. Real properties (strings, short lists, scalars) are untouched."""
+    return {k: v for k, v in node.items() if not _is_vector(v)}
+
 
 class KnowledgeGraphError(Exception):
     """Base for knowledge-graph domain errors (as opposed to driver errors)."""
@@ -174,7 +197,7 @@ class KnowledgeGraph:
                 properties=props,
             )
             record = await result.single()
-            return dict(record["entity"]) if record else {}
+            return _strip_vectors(dict(record["entity"])) if record else {}
 
     async def add_observations(
         self, name: str, project: str, observations: list[str]
@@ -196,7 +219,7 @@ class KnowledgeGraph:
             record = await result.single()
             if not record:
                 raise EntityNotFoundError(name, project)
-            return dict(record["entity"])
+            return _strip_vectors(dict(record["entity"]))
 
     async def delete_entity(self, name: str, project: str) -> bool:
         """Delete an entity and all its relationships."""
@@ -287,7 +310,7 @@ class KnowledgeGraph:
             if not record:
                 return {}
             return {
-                "entity": dict(record["entity"]),
+                "entity": _strip_vectors(dict(record["entity"])),
                 "outgoing_relations": record["outgoing_relations"],
                 "incoming_relations": record["incoming_relations"],
             }
@@ -312,7 +335,7 @@ class KnowledgeGraph:
             # bound to a parameter literally named `query`, which would collide
             # with `session.run`'s positional `query` (the Cypher string).
             result = await session.run(query, parameters=params)
-            return [dict(record["entity"]) async for record in result]
+            return [_strip_vectors(dict(record["entity"])) async for record in result]
 
     async def get_project_graph(self, project: str) -> dict[str, Any]:
         """Get the full knowledge graph for a project."""
@@ -454,7 +477,8 @@ class KnowledgeGraph:
                 parameters={"label": label, "prop": prop, "query": query, "k": k},
             )
             return [
-                {"node": dict(record["node"]), "score": record["score"]} async for record in result
+                {"node": _strip_vectors(dict(record["node"])), "score": record["score"]}
+                async for record in result
             ]
 
     async def fts_search(self, query: str, k: int = 10) -> list[dict[str, Any]]:
@@ -473,7 +497,8 @@ class KnowledgeGraph:
         async with self._drv.session(database=self.database) as session:
             result = await session.run(cypher, parameters={"query": query, "k": k})
             return [
-                {"node": dict(record["node"]), "score": record["score"]} async for record in result
+                {"node": _strip_vectors(dict(record["node"])), "score": record["score"]}
+                async for record in result
             ]
 
     # ── Embeddings (drevo /v1/embeddings, issue #217) ─────────────────
