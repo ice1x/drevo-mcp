@@ -10,6 +10,7 @@ is not supported (drevo auto-indexes), so ``_ensure_indexes`` is best-effort.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,6 +40,49 @@ def _strip_vectors(node: dict[str, Any]) -> dict[str, Any]:
     node projected with ``.*`` doesn't echo its 1536-float ``embedding`` back to
     the caller. Real properties (strings, short lists, scalars) are untouched."""
     return {k: v for k, v in node.items() if not _is_vector(v)}
+
+
+def _node_key(node: dict[str, Any]) -> tuple[Any, ...]:
+    """A stable identity for fusing the same node across ranked lists.
+
+    Prefers ``(name, project)`` — entities written through this MCP are merged on
+    that pair, so it is a reliable identity — and falls back to the node's full
+    content (order-independent) when either is absent. Deliberately avoids
+    ``elementId()``: it is not in drevo's documented Cypher subset, so relying on
+    it would be a guess.
+    """
+    name, project = node.get("name"), node.get("project")
+    if name is not None and project is not None:
+        return ("np", name, project)
+    return ("content", json.dumps(node, sort_keys=True, default=str))
+
+
+def _rrf_fuse(ranked: dict[str, list[dict[str, Any]]], rrf_k: int = 60) -> list[dict[str, Any]]:
+    """Reciprocal Rank Fusion of several ranked ``[{"node", "score"}]`` lists.
+
+    Each node's fused score is ``Σ_i 1 / (rrf_k + rank_i)`` over the lists it
+    appears in (``rank`` is 1-based, best-first). Fusing on **rank** rather than
+    score means the incomparable BM25 and cosine scales never need calibrating;
+    ``rrf_k`` (default 60, from Cormack et al. 2009) damps how much the very top
+    ranks dominate. Returns fused rows ``{"node", "score", "sources"}`` best-first,
+    where ``sources`` maps every input list name to this node's rank there (or
+    ``None`` when it did not appear). Ties keep first-seen order (stable sort).
+    """
+    fused: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for source, rows in ranked.items():
+        for rank, row in enumerate(rows, start=1):
+            key = _node_key(row["node"])
+            entry = fused.get(key)
+            if entry is None:
+                entry = {
+                    "node": row["node"],
+                    "score": 0.0,
+                    "sources": {name: None for name in ranked},
+                }
+                fused[key] = entry
+            entry["score"] += 1.0 / (rrf_k + rank)
+            entry["sources"][source] = rank
+    return sorted(fused.values(), key=lambda e: e["score"], reverse=True)
 
 
 class KnowledgeGraphError(Exception):
@@ -580,3 +624,42 @@ class KnowledgeGraph:
                 return await self.fts_search(query, k)
             raise
         return await self.vector_search(label, prop, vector, k)
+
+    async def hybrid_search(
+        self,
+        query: str,
+        label: str,
+        prop: str = "embedding",
+        k: int = 10,
+        candidates: int = 20,
+        rrf_k: int = 60,
+        model: str | None = None,
+        fallback_to_fts: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Hybrid retrieval: fuse lexical BM25 and semantic vectors via RRF.
+
+        Runs one ``query`` through **both** retrievers over a shared candidate
+        pool of ``candidates`` (clamped up to at least ``k``) — :meth:`fts_search`
+        (BM25, graph-wide) and embed-then-:meth:`vector_search` on ``label``.``prop``
+        — then merges the two rankings with :func:`_rrf_fuse` and returns the top
+        ``k``. Lexical catches exact terms/names/codes; vectors catch meaning;
+        RRF fuses on rank so the incomparable score scales need no calibration.
+        Each returned row is ``{"node", "score", "sources"}`` (``sources`` records
+        the node's rank in each retriever), best-first.
+
+        **Graceful degradation without an LLM:** if embedding generation is
+        unavailable (drevo's ``/v1/embeddings`` → 503, or the upstream errored)
+        and ``fallback_to_fts`` is set (the default), this returns the top ``k``
+        pure BM25 rows (unfused, no ``sources`` — matching :meth:`semantic_search`).
+        Set ``fallback_to_fts=False`` to surface the :class:`EmbeddingError`.
+        """
+        pool = max(candidates, k)
+        fts = await self.fts_search(query, pool)
+        try:
+            vector = await self.embed_text(query, model=model)
+        except EmbeddingError:
+            if fallback_to_fts:
+                return fts[:k]
+            raise
+        vec = await self.vector_search(label, prop, vector, pool)
+        return _rrf_fuse({"fts": fts, "vector": vec}, rrf_k)[:k]
