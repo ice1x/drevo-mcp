@@ -34,6 +34,7 @@ EXPECTED_TOOLS = {
     "vector_search",
     "fts_search",
     "semantic_search",
+    "hybrid_search",
 }
 
 

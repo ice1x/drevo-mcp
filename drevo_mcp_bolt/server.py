@@ -318,6 +318,40 @@ async def semantic_search(
     return _json(results)
 
 
+@mcp.tool()
+@_guard
+async def hybrid_search(
+    query: str,
+    label: str,
+    prop: str = "embedding",
+    k: int = 10,
+    candidates: int = 20,
+    rrf_k: int = 60,
+    model: str | None = None,
+    fallback_to_fts: bool = True,
+) -> str:
+    """Hybrid search: fuse lexical BM25 and semantic vectors with RRF.
+
+    Runs `query` through both retrievers — `fts_search` (BM25, graph-wide) and
+    embed-then-`vector_search` on `label`.`prop` — over a shared pool of
+    `candidates` (at least `k`), then merges the rankings by Reciprocal Rank
+    Fusion and returns the top `k`. Lexical catches exact terms/names/codes;
+    vectors catch meaning; RRF fuses on rank so the two score scales need no
+    calibration. `rrf_k` (default 60) damps how much top ranks dominate. Each row
+    is `{"node": {...}, "score": float, "sources": {"fts": rank|null, "vector":
+    rank|null}}`, best-first.
+
+    Works without an LLM: if embeddings are unavailable (drevo answers 503) or the
+    upstream errors, and `fallback_to_fts` is set (the default), this returns the
+    top `k` pure BM25 rows (unfused, no `sources`). Set `fallback_to_fts=false` to
+    get an `embedding_error` instead.
+    """
+    results = await kg.hybrid_search(
+        query, label, prop, k, candidates, rrf_k, model, fallback_to_fts
+    )
+    return _json(results)
+
+
 # ── Entrypoint ────────────────────────────────────────────────────────
 
 
