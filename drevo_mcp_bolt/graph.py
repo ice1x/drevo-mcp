@@ -57,6 +57,14 @@ def _node_key(node: dict[str, Any]) -> tuple[Any, ...]:
     return ("content", json.dumps(node, sort_keys=True, default=str))
 
 
+def _expandable(node: dict[str, Any]) -> bool:
+    """True when ``node`` can seed further graph expansion — i.e. it carries the
+    ``(name, project)`` identity that :meth:`KnowledgeGraph.neighbors` needs to
+    match it. Nodes without both (e.g. non-entity rows returned by a raw vector
+    search) are still returned as neighbours, but the walk stops at them."""
+    return node.get("name") is not None and node.get("project") is not None
+
+
 def _rrf_fuse(ranked: dict[str, list[dict[str, Any]]], rrf_k: int = 60) -> list[dict[str, Any]]:
     """Reciprocal Rank Fusion of several ranked ``[{"node", "score"}]`` lists.
 
@@ -663,3 +671,108 @@ class KnowledgeGraph:
             raise
         vec = await self.vector_search(label, prop, vector, pool)
         return _rrf_fuse({"fts": fts, "vector": vec}, rrf_k)[:k]
+
+    # ── Graph-aware retrieval ─────────────────────────────────────────
+
+    async def neighbors(self, name: str, project: str, limit: int = 10) -> list[dict[str, Any]]:
+        """The entities directly connected to ``(name, project)``, one hop out.
+
+        Returns ``[{"node": {...}, "relation": str, "direction": "out"|"in"}]`` —
+        each neighbour node with the relationship type that links it and whether
+        the edge points away from (``out``) or into (``in``) the source entity.
+        Uses the same directed ``OPTIONAL MATCH`` idiom as :meth:`get_entity`
+        (drevo-proven; no variable-length paths, no ``startNode()``); ``limit`` is
+        applied client-side. This is the single-hop primitive :meth:`graph_search`
+        walks to expand a neighbourhood.
+        """
+        query = """
+        MATCH (e:Entity {name: $name, project: $project})
+        OPTIONAL MATCH (e)-[ro]->(o:Entity)
+        OPTIONAL MATCH (e)<-[ri]-(i:Entity)
+        WITH
+             collect(DISTINCT {node: o{.*, labels: labels(o)}, relation: type(ro), direction: 'out'}) AS outs,
+             collect(DISTINCT {node: i{.*, labels: labels(i)}, relation: type(ri), direction: 'in'}) AS ins
+        RETURN [x IN outs WHERE x.node IS NOT NULL] AS outgoing,
+               [x IN ins WHERE x.node IS NOT NULL] AS incoming
+        """
+        async with self._drv.session(database=self.database) as session:
+            result = await session.run(query, name=name, project=project)
+            record = await result.single()
+            if not record:
+                return []
+            rows = list(record["outgoing"]) + list(record["incoming"])
+            neighbours = [
+                {
+                    "node": _strip_vectors(dict(row["node"])),
+                    "relation": row["relation"],
+                    "direction": row["direction"],
+                }
+                for row in rows
+            ]
+            return neighbours[:limit]
+
+    async def graph_search(
+        self,
+        query: str,
+        label: str,
+        prop: str = "embedding",
+        k: int = 5,
+        hops: int = 1,
+        neighbors_per_node: int = 10,
+        candidates: int = 20,
+        rrf_k: int = 60,
+        model: str | None = None,
+        fallback_to_fts: bool = True,
+    ) -> dict[str, Any]:
+        """Graph-aware retrieval: relevance-rank seeds, then expand along edges.
+
+        Runs :meth:`hybrid_search` to get the top-``k`` **seed** nodes, then walks
+        the graph outward up to ``hops`` steps — a client-side breadth-first walk
+        over :meth:`neighbors` (single-hop, drevo-safe), not a ``[*1..n]``
+        variable-length path — pulling in each seed's connected neighbourhood as
+        context. This is what makes retrieval *graph-aware* rather than a flat
+        vector lookup: an LLM gets both the most-relevant nodes and what they link
+        to.
+
+        Returns ``{"seeds": [...hybrid rows...], "expanded": [...]}`` where each
+        expanded row is ``{"node", "distance", "via": {"from_name",
+        "from_project", "relation", "direction"}}``. Nodes are deduplicated across
+        the whole walk (a seed is never re-listed as its own neighbour; a node
+        reached from two frontier nodes appears once, attributed to the first).
+        Only nodes with a ``(name, project)`` identity (:func:`_expandable`) are
+        walked further; identity-less neighbours are returned but not expanded.
+        ``hops=0`` returns seeds only. Search knobs pass through to
+        :meth:`hybrid_search` (including the no-LLM ``fallback_to_fts`` degradation).
+        """
+        seeds = await self.hybrid_search(
+            query, label, prop, k, candidates, rrf_k, model, fallback_to_fts
+        )
+        visited: set[tuple[Any, ...]] = {_node_key(s["node"]) for s in seeds}
+        frontier = [s["node"] for s in seeds if _expandable(s["node"])]
+        expanded: list[dict[str, Any]] = []
+        for distance in range(1, hops + 1):
+            next_frontier: list[dict[str, Any]] = []
+            for node in frontier:
+                for nb in await self.neighbors(node["name"], node["project"], neighbors_per_node):
+                    key = _node_key(nb["node"])
+                    if key in visited:
+                        continue
+                    visited.add(key)
+                    expanded.append(
+                        {
+                            "node": nb["node"],
+                            "distance": distance,
+                            "via": {
+                                "from_name": node["name"],
+                                "from_project": node["project"],
+                                "relation": nb["relation"],
+                                "direction": nb["direction"],
+                            },
+                        }
+                    )
+                    if _expandable(nb["node"]):
+                        next_frontier.append(nb["node"])
+            frontier = next_frontier
+            if not frontier:
+                break
+        return {"seeds": seeds, "expanded": expanded}

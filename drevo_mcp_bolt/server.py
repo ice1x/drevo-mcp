@@ -352,6 +352,41 @@ async def hybrid_search(
     return _json(results)
 
 
+@mcp.tool()
+@_guard
+async def graph_search(
+    query: str,
+    label: str,
+    prop: str = "embedding",
+    k: int = 5,
+    hops: int = 1,
+    neighbors_per_node: int = 10,
+    candidates: int = 20,
+    rrf_k: int = 60,
+    model: str | None = None,
+    fallback_to_fts: bool = True,
+) -> str:
+    """Graph-aware retrieval: rank seeds by relevance, then expand along edges.
+
+    Runs `hybrid_search` for the top-`k` **seed** nodes, then walks the graph
+    outward up to `hops` steps (a breadth-first walk over one-hop neighbours,
+    `neighbors_per_node` per node) and returns the seeds plus their deduplicated
+    neighbourhood — so an LLM gets both the most-relevant nodes and what they
+    link to, not a flat vector lookup.
+
+    Returns `{"seeds": [...hybrid rows...], "expanded": [{"node": {...},
+    "distance": int, "via": {"from_name", "from_project", "relation",
+    "direction"}}]}`. A seed is never re-listed as its own neighbour; a node
+    reached from two nodes appears once. `hops=0` returns seeds only. The search
+    knobs (`prop`, `candidates`, `rrf_k`, `model`, `fallback_to_fts`) pass through
+    to `hybrid_search`, including the no-LLM BM25 fallback.
+    """
+    results = await kg.graph_search(
+        query, label, prop, k, hops, neighbors_per_node, candidates, rrf_k, model, fallback_to_fts
+    )
+    return _json(results)
+
+
 # ── Entrypoint ────────────────────────────────────────────────────────
 
 
