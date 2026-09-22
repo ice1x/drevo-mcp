@@ -29,7 +29,7 @@ from drevo_mcp_bolt.graph import EmbeddingError, KnowledgeGraph, KnowledgeGraphE
 _BOLT_URI = os.getenv("DREVO_BOLT_URL", "bolt://localhost:7687")
 _BOLT_USER = os.getenv("DREVO_BOLT_USER", "neo4j")
 _BOLT_PASS = os.getenv("DREVO_BOLT_PASSWORD", "drevo")
-_BOLT_DB = os.getenv("DREVO_BOLT_DATABASE", "neo4j")
+_BOLT_DB = os.getenv("DREVO_BOLT_DATABASE", "drevo")
 # drevo's HTTP API base — used by `semantic_search` to reach the OpenAI-compatible
 # `/v1/embeddings` endpoint (issue #217). Separate from Bolt because embedding
 # generation is HTTP-only in drevo.
