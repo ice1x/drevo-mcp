@@ -55,5 +55,16 @@ def test_server_default_uri_targets_drevo_bolt_port() -> None:
     assert server.kg.uri.endswith(":7687")
 
 
+def test_default_database_is_drevo_not_neo4j() -> None:
+    # drevo's default database is named "drevo" (its protected DEFAULT_DB), not
+    # Neo4j's conventional "neo4j". Since drevo's multi-database catalog landed
+    # it rejects `USE neo4j` with a 404, so a Bolt driver that falls back to
+    # database="neo4j" fails every call with "database `neo4j` does not exist".
+    # The client must therefore default to "drevo" when DREVO_BOLT_DATABASE is
+    # unset — both on the dataclass field and the server's env fallback literal.
+    assert KnowledgeGraph(uri="bolt://x", username="u", password="p").database == "drevo"
+    assert server.kg.database == "drevo"
+
+
 def test_server_registers_full_tool_surface() -> None:
     assert _registered_tool_names() == EXPECTED_TOOLS
