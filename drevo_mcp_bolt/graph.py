@@ -11,6 +11,7 @@ is not supported (drevo auto-indexes), so ``_ensure_indexes`` is best-effort.
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -663,3 +664,141 @@ class KnowledgeGraph:
             raise
         vec = await self.vector_search(label, prop, vector, pool)
         return _rrf_fuse({"fts": fts, "vector": vec}, rrf_k)[:k]
+
+    # ── Agent memory (context graph) ──────────────────────────────────
+    # A drevo-native "context graph" for agent memory: a session's turns are a
+    # linked chain of ``:Message`` nodes (short-term memory), and decisions are
+    # ``:ReasoningTrace`` nodes tied back to the message that prompted them
+    # (reasoning memory). This is the interim, client-side-Cypher slice of the
+    # capability (drevo-mcp #15); once drevo grows native ``drevo.memory.*``
+    # procedures (drevo #533) these become thin wrappers. Every query stays
+    # inside drevo's proven Cypher subset (MERGE-free CREATE, ``datetime()``,
+    # ``FOREACH``/``CASE`` conditional edges, ``coalesce``, no variable-length
+    # paths) — verified live against a drevo container.
+
+    async def add_message(self, session: str, role: str, text: str) -> dict[str, Any]:
+        """Append a message to a session's short-term memory chain.
+
+        Each session is an ordered chain of ``:Message`` nodes: the new message
+        gets ``seq = max(seq)+1`` for the session and a ``:NEXT`` edge from the
+        previous newest message (the first message in a session has no
+        predecessor, so no edge). ``text`` is mirrored into ``body`` so the turn
+        is reachable by :meth:`fts_search`. Returns the created message node.
+        """
+        query = """
+        OPTIONAL MATCH (prev:Message {session: $session})
+        WITH prev ORDER BY prev.seq DESC LIMIT 1
+        WITH prev, coalesce(prev.seq, 0) + 1 AS seq
+        CREATE (m:Message {
+            id: $id, session: $session, role: $role, text: $text,
+            seq: seq, created_at: datetime()
+        })
+        SET m.body = m.text
+        FOREACH (_ IN CASE WHEN prev IS NULL THEN [] ELSE [1] END |
+            CREATE (prev)-[:NEXT]->(m))
+        RETURN m{.*, labels: labels(m)} AS message
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(
+                query, id=str(uuid.uuid4()), session=session, role=role, text=text
+            )
+            record = await result.single()
+            return _strip_vectors(dict(record["message"])) if record else {}
+
+    async def get_conversation(self, session: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Read back a session's messages in chronological order (oldest first).
+
+        Returns the most recent ``limit`` messages of ``session`` — fetched newest
+        first, then reversed — so a caller can replay the tail of the conversation
+        as context for the next turn.
+        """
+        query = """
+        MATCH (m:Message {session: $session})
+        RETURN m{.id, .seq, .role, .text, .created_at} AS message
+        ORDER BY m.seq DESC
+        LIMIT $limit
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(query, session=session, limit=limit)
+            messages = [dict(record["message"]) async for record in result]
+        messages.reverse()
+        return messages
+
+    async def recall_memory(
+        self, session: str, query: str, k: int = 5, hops: int = 1
+    ) -> list[dict[str, Any]]:
+        """Recall the most relevant past messages in a session, with context.
+
+        Session-scoped lexical recall: the ``k`` most recent messages of
+        ``session`` whose text contains ``query`` (case-insensitive), each
+        returned with its conversational neighbours along the ``:NEXT`` chain
+        (the message before and after it) when ``hops >= 1`` — so the caller gets
+        not just the hit but the exchange around it. ``hops = 0`` returns hits
+        only. This is the no-embedder path (works whether or not drevo's
+        ``/v1/embeddings`` is configured); semantic/vector recall is a follow-up
+        (drevo #532 / #533). Each row is ``{"message": {...}, "context":
+        {"prev": {...}|None, "next": {...}|None}}`` (``context`` omitted when
+        ``hops = 0``), ordered oldest hit first.
+        """
+        cypher = """
+        MATCH (m:Message {session: $session})
+        WHERE toLower(m.text) CONTAINS toLower($query)
+        WITH m ORDER BY m.seq DESC LIMIT $k
+        OPTIONAL MATCH (m)-[:NEXT]->(nx:Message)
+        OPTIONAL MATCH (pv:Message)-[:NEXT]->(m)
+        RETURN m{.id, .seq, .role, .text, .created_at} AS hit,
+               pv{.seq, .role, .text} AS prev,
+               nx{.seq, .role, .text} AS next
+        ORDER BY m.seq
+        """
+        include_context = hops >= 1
+        # `query` is bound to a Cypher parameter literally named `query`, which
+        # would collide with `session.run`'s positional `query` (the Cypher
+        # string) — pass everything via `parameters=` (see :meth:`search`).
+        params = {"session": session, "query": query, "k": k}
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(cypher, parameters=params)
+            rows: list[dict[str, Any]] = []
+            async for record in result:
+                row: dict[str, Any] = {"message": dict(record["hit"])}
+                if include_context:
+                    row["context"] = {
+                        "prev": dict(record["prev"]) if record["prev"] else None,
+                        "next": dict(record["next"]) if record["next"] else None,
+                    }
+                rows.append(row)
+            return rows
+
+    async def record_reasoning(
+        self, session: str, step: str, tool: str | None = None, outcome: str | None = None
+    ) -> dict[str, Any]:
+        """Record a reasoning/decision trace in a session's reasoning memory.
+
+        Creates a ``:ReasoningTrace`` node (``step`` — what was decided/done,
+        optional ``tool`` invoked, optional ``outcome``) linked ``:INITIATED_BY``
+        to the session's newest message, so the decision stays anchored to the
+        turn that prompted it (no edge when the session has no messages yet).
+        Returns the created trace node.
+        """
+        cypher = """
+        OPTIONAL MATCH (last:Message {session: $session})
+        WITH last ORDER BY last.seq DESC LIMIT 1
+        CREATE (t:ReasoningTrace {
+            id: $id, session: $session, step: $step,
+            tool: $tool, outcome: $outcome, created_at: datetime()
+        })
+        FOREACH (_ IN CASE WHEN last IS NULL THEN [] ELSE [1] END |
+            CREATE (t)-[:INITIATED_BY]->(last))
+        RETURN t{.*, labels: labels(t)} AS trace
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(
+                cypher,
+                id=str(uuid.uuid4()),
+                session=session,
+                step=step,
+                tool=tool,
+                outcome=outcome,
+            )
+            record = await result.single()
+            return dict(record["trace"]) if record else {}

@@ -352,6 +352,68 @@ async def hybrid_search(
     return _json(results)
 
 
+# ── Tools: Agent memory (context graph) ───────────────────────────────
+# A drevo-native agent-memory surface so an assistant gets short-term and
+# reasoning memory over drevo without hand-writing a pipeline (drevo-mcp #15).
+# `session` is the memory scope — use one stable id per conversation/agent.
+
+
+@mcp.tool()
+@_guard
+async def add_message(session: str, role: str, text: str) -> str:
+    """Append a message to a session's memory (short-term memory chain).
+
+    Record each turn as it happens: `session` is a stable id for the
+    conversation/agent, `role` is who spoke ("user"/"assistant"/"system"/"tool"),
+    `text` is the content. Messages are kept as an ordered `:NEXT` chain and made
+    full-text searchable, so later `recall_memory` / `get_conversation` calls can
+    bring them back. Returns the stored message (with its `id` and `seq`).
+    """
+    return _json(await kg.add_message(session, role, text))
+
+
+@mcp.tool()
+@_guard
+async def get_conversation(session: str, limit: int = 50) -> str:
+    """Replay a session's recent messages in chronological order (oldest first).
+
+    Returns the last `limit` messages of `session` as `[{"id", "seq", "role",
+    "text", "created_at"}]` — the running transcript to reload as context at the
+    start of a turn.
+    """
+    return _json(await kg.get_conversation(session, limit))
+
+
+@mcp.tool()
+@_guard
+async def recall_memory(session: str, query: str, k: int = 5, hops: int = 1) -> str:
+    """Recall relevant past messages in a session, with the exchange around them.
+
+    Finds the `k` most recent messages of `session` whose text matches `query`
+    (case-insensitive), each returned with its neighbouring turns along the
+    conversation chain when `hops >= 1` (`hops = 0` = hits only). Use it to answer
+    "what did we say about X?" without replaying the whole history. Each row is
+    `{"message": {...}, "context": {"prev": {...}|null, "next": {...}|null}}`,
+    oldest hit first.
+    """
+    return _json(await kg.recall_memory(session, query, k, hops))
+
+
+@mcp.tool()
+@_guard
+async def record_reasoning(
+    session: str, step: str, tool: str | None = None, outcome: str | None = None
+) -> str:
+    """Record a reasoning/decision trace in a session (reasoning memory).
+
+    Persist why something was done: `step` is the decision or reasoning, `tool`
+    the tool invoked (optional), `outcome` the result (optional). The trace is
+    linked back to the session's latest message, so the audit trail stays
+    anchored to the turn that prompted it. Returns the stored trace.
+    """
+    return _json(await kg.record_reasoning(session, step, tool, outcome))
+
+
 # ── Entrypoint ────────────────────────────────────────────────────────
 
 

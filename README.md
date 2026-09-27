@@ -334,6 +334,30 @@ upstream configured (`DREVO_EMBEDDINGS_UPSTREAM`). Set `DREVO_HTTP_URL`
 `label`.`prop` embeddings. Pass `fallback_to_fts=false` to get an
 `embedding_error` envelope instead.
 
+### Agent memory (context graph)
+
+A drevo-native **context graph** for agent memory, so an assistant gets
+persistent short-term and reasoning memory over drevo without hand-writing a
+pipeline. A `session` is the memory scope — use one stable id per
+conversation/agent. Turns are stored as an ordered `:NEXT` chain of `:Message`
+nodes (and mirrored into the drevo-indexed `body` field, so they're searchable);
+decisions are `:ReasoningTrace` nodes linked `:INITIATED_BY` the message that
+prompted them.
+
+| Tool | Arguments | Effect |
+|------|-----------|--------|
+| `add_message` | `session`, `role`, `text` | Append a turn to the session's memory chain (auto-sequenced, `:NEXT`-linked, full-text searchable). |
+| `get_conversation` | `session`, `limit=50` | Replay the last `limit` messages in chronological order. |
+| `recall_memory` | `session`, `query`, `k=5`, `hops=1` | The `k` most recent messages matching `query`, each with its neighbouring turns (`hops>=1`) as `{"message", "context": {"prev", "next"}}`. |
+| `record_reasoning` | `session`, `step`, `tool=None`, `outcome=None` | Record a reasoning/decision trace linked to the session's latest message. |
+
+This is the interim, client-side-Cypher slice (drevo-mcp #15): `recall_memory`
+is lexical + conversational-context (no embedder required, works today).
+Semantic/vector recall and long-term entity promotion (POLE+O with temporal
+validity) land once drevo grows native `drevo.memory.*` procedures
+(drevo #533) and a Neo4j-compatible vector surface (drevo #532), after which
+these tools become thin wrappers.
+
 ### Migrations (write)
 
 | Tool | Arguments | Effect |
