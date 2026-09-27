@@ -145,7 +145,7 @@ class KnowledgeGraph:
     uri: str
     username: str
     password: str
-    database: str = "neo4j"
+    database: str = "drevo"
     # drevo's HTTP API base (the OpenAI-compatible embeddings endpoint lives at
     # ``{http_url}/v1/embeddings``). Separate from the Bolt ``uri`` because
     # embedding generation is HTTP-only in drevo (issue #217).
