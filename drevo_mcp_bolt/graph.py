@@ -802,3 +802,94 @@ class KnowledgeGraph:
             )
             record = await result.single()
             return dict(record["trace"]) if record else {}
+
+    # ── Long-term memory (drevo#533) ──────────────────────────────────
+    #
+    # Thin wrappers over drevo's native ``drevo.memory.*`` procedures: the
+    # memory semantics (POLE+O upsert, fact validity windows, supersession)
+    # live in drevo, so every Bolt client gets the same behaviour and nothing
+    # is re-implemented here.
+
+    async def remember_entity(
+        self,
+        session: str | None,
+        name: str,
+        entity_type: str,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Upsert a POLE+O entity (``PERSON`` / ``OBJECT`` / ``LOCATION`` /
+        ``EVENT`` / ``ORGANIZATION``) keyed on ``(name, type)``, linked
+        ``:MENTIONS`` from the session's newest message when ``session`` is set.
+        Returns the entity node without its embedding."""
+        query = """
+        CALL drevo.memory.rememberEntity($session, $name, $type, $description)
+        YIELD node
+        RETURN node{.*, labels: labels(node)} AS entity
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(
+                query,
+                parameters={
+                    "session": session,
+                    "name": name,
+                    "type": entity_type,
+                    "description": description,
+                },
+            )
+            record = await result.single()
+            return _strip_vectors(dict(record["entity"])) if record else {}
+
+    async def assert_fact(
+        self, subject: str, relation: str, obj: str, exclusive: bool = False
+    ) -> dict[str, Any]:
+        """Record that ``subject -relation-> obj`` holds from now. Idempotent
+        while it holds; ``exclusive`` first closes the subject's other current
+        facts of that relation (kept as history). Returns the fact."""
+        query = """
+        CALL drevo.memory.assertFact($subject, $relation, $object, $exclusive)
+        YIELD rel
+        RETURN rel.id AS id, rel.type AS relation,
+               rel.valid_from AS valid_from, rel.valid_until AS valid_until
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(
+                query,
+                parameters={
+                    "subject": subject,
+                    "relation": relation,
+                    "object": obj,
+                    "exclusive": exclusive,
+                },
+            )
+            record = await result.single()
+            return {"subject": subject, "object": obj, **dict(record)} if record else {}
+
+    async def retract_fact(self, subject: str, relation: str, obj: str) -> list[dict[str, Any]]:
+        """End the current ``subject -relation-> obj`` fact(s): ``valid_until``
+        is set to now and the fact stays as history. Returns the closed facts
+        (empty when nothing held)."""
+        query = """
+        CALL drevo.memory.retractFact($subject, $relation, $object)
+        YIELD rel
+        RETURN rel.id AS id, rel.type AS relation,
+               rel.valid_from AS valid_from, rel.valid_until AS valid_until
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(
+                query, parameters={"subject": subject, "relation": relation, "object": obj}
+            )
+            return [{"subject": subject, "object": obj, **dict(r)} async for r in result]
+
+    async def facts_at(self, name: str, as_of: str | None = None) -> list[dict[str, Any]]:
+        """What memory held about entity ``name`` at ``as_of`` (an ISO-8601 UTC
+        timestamp; ``None`` = now): every fact touching it, either direction,
+        valid at that instant, oldest first."""
+        query = """
+        CALL drevo.memory.factsAt($name, $as_of)
+        YIELD subject, relation, object, valid_from, valid_until
+        RETURN subject.name AS subject, relation, object.name AS object,
+               valid_from, valid_until
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(query, parameters={"name": name, "as_of": as_of})
+            return [dict(r) async for r in result]
