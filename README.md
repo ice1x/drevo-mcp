@@ -370,6 +370,12 @@ v0.0.33); an older server answers "no such procedure".
 | `retract_fact` | `subject`, `relation`, `object` | End a fact that no longer holds (kept as history). |
 | `facts_at` | `name`, `as_of=None` | Every fact about `name` valid at `as_of` (ISO-8601 UTC; omit for now). |
 
+### Graph algorithms (read)
+
+| Tool | Arguments | Effect |
+|------|-----------|--------|
+| `stable_matching` | `proposer_label`, `acceptor_label`, `rel_type`, `rank_property="rank"` | Gale–Shapley stable matching of two node groups that rank each other with `rel_type` edges (lower rank = preferred; only mutual preferences match). Wraps drevo's `drevo.stableMatching` (drevo #541) — needs a drevo release that ships it. |
+
 ### Migrations (write)
 
 | Tool | Arguments | Effect |

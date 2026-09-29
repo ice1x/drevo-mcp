@@ -43,6 +43,7 @@ EXPECTED_TOOLS = {
     "assert_fact",
     "retract_fact",
     "facts_at",
+    "stable_matching",
 }
 
 

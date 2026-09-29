@@ -465,6 +465,23 @@ async def facts_at(name: str, as_of: str | None = None) -> str:
     return _json(await kg.facts_at(name, as_of))
 
 
+@mcp.tool()
+@_guard
+async def stable_matching(
+    proposer_label: str, acceptor_label: str, rel_type: str, rank_property: str = "rank"
+) -> str:
+    """Stable one-to-one matching of two groups by their ranked preferences.
+
+    Gale–Shapley over preferences stored as edges: each `proposer_label` node
+    ranks `acceptor_label` nodes with outgoing `rel_type` edges carrying a
+    numeric `rank_property` (lower = preferred), and vice versa. E.g. mentees ↔
+    mentors, reviewers ↔ papers. Only mutually ranked pairs match; the result is
+    stable (no two would both rather be together) and best for the proposers.
+    Returns the matched pairs with the rank each side gave the other.
+    """
+    return _json(await kg.stable_matching(proposer_label, acceptor_label, rel_type, rank_property))
+
+
 # ── Entrypoint ────────────────────────────────────────────────────────
 
 
