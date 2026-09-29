@@ -348,12 +348,13 @@ prompted them.
 |------|-----------|--------|
 | `add_message` | `session`, `role`, `text` | Append a turn to the session's memory chain (auto-sequenced, `:NEXT`-linked, full-text searchable). |
 | `get_conversation` | `session`, `limit=50` | Replay the last `limit` messages in chronological order. |
-| `recall_memory` | `session`, `query`, `k=5`, `hops=1` | The `k` most recent messages matching `query`, each with its neighbouring turns (`hops>=1`) as `{"message", "context": {"prev", "next"}}`. |
+| `recall_memory` | `session`, `query`, `k=5`, `hops=1` | The `k` messages most relevant to `query` (BM25), each with its `score` and neighbouring turns (`hops>=1`) as `{"message", "score", "context": {"prev", "next"}}`. |
 | `record_reasoning` | `session`, `step`, `tool=None`, `outcome=None` | Record a reasoning/decision trace linked to the session's latest message. |
 
-These four write and read with client-side Cypher (drevo-mcp #15), so they
-work against any drevo. `recall_memory` is lexical + conversational-context (no
-embedder required).
+These four are thin wrappers over drevo's native `drevo.memory.*` procedures
+(drevo #533), so any Bolt client writes the same graph; they need drevo 0.0.34
+or later. `recall_memory` ranks by BM25 relevance (word matches, no embedder
+required), returns each hit's `score`, and adds the conversational context.
 
 **Long-term memory** — what the agent knows about the world, as POLE+O
 entities (`PERSON`, `OBJECT`, `LOCATION`, `EVENT`, `ORGANIZATION`) and facts

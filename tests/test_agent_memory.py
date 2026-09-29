@@ -107,6 +107,114 @@ def test_add_message_failure_becomes_structured_error(monkeypatch: pytest.Monkey
     assert out["error_type"] == "unavailable"
 
 
+# ── Graph layer: the tools are thin wrappers over drevo.memory.* ──────
+
+
+class _Result:
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        self._records = records
+
+    async def single(self) -> dict[str, Any] | None:
+        return self._records[0] if self._records else None
+
+    def __aiter__(self) -> "_Result":
+        self._it = iter(self._records)
+        return self
+
+    async def __anext__(self) -> dict[str, Any]:
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
+class _Session:
+    def __init__(self, calls: list[tuple[str, dict[str, Any]]], records: list[dict[str, Any]]):
+        self._calls, self._records = calls, records
+
+    async def __aenter__(self) -> "_Session":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def run(self, query: str, parameters: dict[str, Any] | None = None, **kw: Any) -> _Result:
+        self._calls.append((query, {**(parameters or {}), **kw}))
+        return _Result(self._records)
+
+
+class _Driver:
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self._records = records
+
+    def session(self, **_kw: Any) -> _Session:
+        return _Session(self.calls, self._records)
+
+    async def close(self) -> None:
+        return None
+
+
+def _kg(records: list[dict[str, Any]]) -> tuple[KnowledgeGraph, _Driver]:
+    kg = KnowledgeGraph(uri="bolt://x", username="u", password="p")
+    drv = _Driver(records)
+    kg._driver = drv  # type: ignore[assignment]
+    return kg, drv
+
+
+def test_add_message_calls_the_native_procedure() -> None:
+    kg, drv = _kg([{"message": {"seq": 1, "text": "hi", "embedding": [0.1] * 1536}}])
+    out = asyncio.run(kg.add_message("s1", "user", "hi"))
+    query, params = drv.calls[0]
+    assert "CALL drevo.memory.addMessage($session, $role, $text)" in query
+    assert params == {"session": "s1", "role": "user", "text": "hi"}
+    assert out == {"seq": 1, "text": "hi"}  # vector stripped
+
+
+def test_get_conversation_calls_the_native_procedure() -> None:
+    rows = [{"message": {"seq": 1}}, {"message": {"seq": 2}}]
+    kg, drv = _kg(rows)
+    out = asyncio.run(kg.get_conversation("s1", limit=10))
+    query, params = drv.calls[0]
+    assert "CALL drevo.memory.getConversation($session, $limit)" in query
+    assert params == {"session": "s1", "limit": 10}
+    assert out == [{"seq": 1}, {"seq": 2}]  # already chronological
+
+
+def test_recall_memory_calls_native_recall_and_keeps_context() -> None:
+    rows = [
+        {
+            "hit": {"seq": 2, "text": "the port is 7688"},
+            "prev": {"seq": 1, "text": "which port?"},
+            "next": None,
+            "score": 3.5,
+        }
+    ]
+    kg, drv = _kg(rows)
+    out = asyncio.run(kg.recall_memory("s1", "port", k=3, hops=1))
+    query, params = drv.calls[0]
+    assert "CALL drevo.memory.recall($session, $query, $k)" in query
+    assert params == {"session": "s1", "query": "port", "k": 3}
+    assert out == [
+        {
+            "message": {"seq": 2, "text": "the port is 7688"},
+            "score": 3.5,
+            "context": {"prev": {"seq": 1, "text": "which port?"}, "next": None},
+        }
+    ]
+    # hops=0: hits only.
+    assert "context" not in asyncio.run(kg.recall_memory("s1", "port", k=3, hops=0))[0]
+
+
+def test_record_reasoning_calls_the_native_procedure() -> None:
+    kg, drv = _kg([{"trace": {"step": "chose X", "tool": None}}])
+    out = asyncio.run(kg.record_reasoning("s1", "chose X"))
+    query, params = drv.calls[0]
+    assert "CALL drevo.memory.recordReasoning($session, $step, $tool, $outcome)" in query
+    assert params == {"session": "s1", "step": "chose X", "tool": None, "outcome": None}
+    assert out == {"step": "chose X", "tool": None}
+
+
 # ── Integration (opt-in, live drevo) ──────────────────────────────────
 
 _BOLT_URL = os.environ.get("DREVO_BOLT_URL")
