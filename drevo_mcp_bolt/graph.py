@@ -893,3 +893,40 @@ class KnowledgeGraph:
         async with self._drv.session(database=self.database) as sess:
             result = await sess.run(query, parameters={"name": name, "as_of": as_of})
             return [dict(r) async for r in result]
+
+    # ── Graph algorithms ──────────────────────────────────────────────
+
+    async def stable_matching(
+        self,
+        proposer_label: str,
+        acceptor_label: str,
+        rel_type: str,
+        rank_property: str = "rank",
+    ) -> list[dict[str, Any]]:
+        """Gale–Shapley stable matching via drevo's native ``drevo.stableMatching``
+        (drevo#541): pair the ``proposer_label`` nodes with the
+        ``acceptor_label`` nodes from the preferences stored as ``rel_type``
+        edges (lower ``rank_property`` = preferred; only mutual preferences can
+        match). Proposer-optimal; one row per matched pair, node vectors
+        stripped."""
+        query = """
+        CALL drevo.stableMatching($proposer_label, $acceptor_label, $rel_type, $rank_property)
+        YIELD proposer, acceptor, proposerRank, acceptorRank
+        RETURN proposer{.*} AS proposer, acceptor{.*} AS acceptor,
+               proposerRank AS proposer_rank, acceptorRank AS acceptor_rank
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(
+                query,
+                parameters={
+                    "proposer_label": proposer_label,
+                    "acceptor_label": acceptor_label,
+                    "rel_type": rel_type,
+                    "rank_property": rank_property,
+                },
+            )
+            rows = [dict(r) async for r in result]
+        for row in rows:
+            row["proposer"] = _strip_vectors(dict(row["proposer"]))
+            row["acceptor"] = _strip_vectors(dict(row["acceptor"]))
+        return rows
