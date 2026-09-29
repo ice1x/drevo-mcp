@@ -39,6 +39,10 @@ EXPECTED_TOOLS = {
     "get_conversation",
     "recall_memory",
     "record_reasoning",
+    "remember_entity",
+    "assert_fact",
+    "retract_fact",
+    "facts_at",
 }
 
 

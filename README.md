@@ -351,12 +351,24 @@ prompted them.
 | `recall_memory` | `session`, `query`, `k=5`, `hops=1` | The `k` most recent messages matching `query`, each with its neighbouring turns (`hops>=1`) as `{"message", "context": {"prev", "next"}}`. |
 | `record_reasoning` | `session`, `step`, `tool=None`, `outcome=None` | Record a reasoning/decision trace linked to the session's latest message. |
 
-This is the interim, client-side-Cypher slice (drevo-mcp #15): `recall_memory`
-is lexical + conversational-context (no embedder required, works today).
-Semantic/vector recall and long-term entity promotion (POLE+O with temporal
-validity) land once drevo grows native `drevo.memory.*` procedures
-(drevo #533) and a Neo4j-compatible vector surface (drevo #532), after which
-these tools become thin wrappers.
+These four write and read with client-side Cypher (drevo-mcp #15), so they
+work against any drevo. `recall_memory` is lexical + conversational-context (no
+embedder required).
+
+**Long-term memory** — what the agent knows about the world, as POLE+O
+entities (`PERSON`, `OBJECT`, `LOCATION`, `EVENT`, `ORGANIZATION`) and facts
+between them that hold over a validity window. Superseded facts are closed, not
+deleted, so memory can answer "what did we know then?". These are thin wrappers
+over drevo's native `drevo.memory.*` procedures (drevo #533) — the semantics
+live in drevo — so they need a drevo that ships them (the release after
+v0.0.33); an older server answers "no such procedure".
+
+| Tool | Arguments | Effect |
+|------|-----------|--------|
+| `remember_entity` | `name`, `entity_type`, `session=None`, `description=None` | Upsert an entity keyed on (name, type); with `session`, link it from the session's latest message (`:MENTIONS`). |
+| `assert_fact` | `subject`, `relation`, `object`, `exclusive=False` | Record `subject -relation-> object` valid from now; `exclusive=True` closes the subject's previous facts of that relation (e.g. a new employer ends the old one). |
+| `retract_fact` | `subject`, `relation`, `object` | End a fact that no longer holds (kept as history). |
+| `facts_at` | `name`, `as_of=None` | Every fact about `name` valid at `as_of` (ISO-8601 UTC; omit for now). |
 
 ### Migrations (write)
 

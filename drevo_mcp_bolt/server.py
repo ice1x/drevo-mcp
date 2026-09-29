@@ -414,6 +414,57 @@ async def record_reasoning(
     return _json(await kg.record_reasoning(session, step, tool, outcome))
 
 
+@mcp.tool()
+@_guard
+async def remember_entity(
+    name: str, entity_type: str, session: str | None = None, description: str | None = None
+) -> str:
+    """Remember a long-term entity (long-term memory).
+
+    `entity_type` is one of PERSON, OBJECT, LOCATION, EVENT, ORGANIZATION
+    (case-insensitive). The same (name, type) is one entity: calling again
+    reuses it and refreshes `description` when given. With `session`, the
+    session's latest message is linked to it (what this conversation
+    mentioned). Returns the entity.
+    """
+    return _json(await kg.remember_entity(session, name, entity_type, description))
+
+
+@mcp.tool()
+@_guard
+async def assert_fact(subject: str, relation: str, object: str, exclusive: bool = False) -> str:
+    """Record a fact between two remembered entities, valid from now.
+
+    E.g. subject="Dana", relation="WORKS_AT", object="Acme". Re-asserting a fact
+    that holds is a no-op. `exclusive=True` means the subject can hold only one
+    such fact at a time: the previous ones of that relation are closed (kept as
+    history), so "WORKS_AT Globex" ends "WORKS_AT Acme". Returns the fact.
+    """
+    return _json(await kg.assert_fact(subject, relation, object, exclusive))
+
+
+@mcp.tool()
+@_guard
+async def retract_fact(subject: str, relation: str, object: str) -> str:
+    """End a fact that no longer holds (it stays queryable as history).
+
+    Returns the closed facts; empty when nothing held.
+    """
+    return _json(await kg.retract_fact(subject, relation, object))
+
+
+@mcp.tool()
+@_guard
+async def facts_at(name: str, as_of: str | None = None) -> str:
+    """What long-term memory holds about an entity, now or at a past instant.
+
+    Every fact touching `name` (either direction) valid at `as_of`, an ISO-8601
+    UTC timestamp like "2026-09-29T10:00:00.000Z"; omit it for now. Each fact has
+    subject, relation, object, valid_from, valid_until.
+    """
+    return _json(await kg.facts_at(name, as_of))
+
+
 # ── Entrypoint ────────────────────────────────────────────────────────
 
 
