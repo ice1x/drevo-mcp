@@ -155,9 +155,15 @@ class KnowledgeGraph:
         # Note: no `notifications_disabled_categories` — that is a Bolt-5.x
         # feature, and drevo negotiates Bolt 4.4. Leaving it off keeps the
         # client compatible with both drevo and Neo4j.
+        # `liveness_check_timeout=0`: RESET a pooled connection before reusing
+        # it, and replace it when that fails. A drevo restart (redeploy,
+        # `drevo-restart.sh`) kills every pooled connection; without the check
+        # the next tool call reuses a dead one and fails with "Failed to read
+        # from defunct connection". The RESET is one cheap round trip.
         self._driver = AsyncGraphDatabase.driver(
             self.uri,
             auth=(self.username, self.password),
+            liveness_check_timeout=0,
         )
         # Best-effort: if the drevo container is down at launch, still start the
         # server so it can come up and report a structured per-call error, rather
