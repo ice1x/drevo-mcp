@@ -389,12 +389,12 @@ async def get_conversation(session: str, limit: int = 50) -> str:
 async def recall_memory(session: str, query: str, k: int = 5, hops: int = 1) -> str:
     """Recall relevant past messages in a session, with the exchange around them.
 
-    Finds the `k` most recent messages of `session` whose text matches `query`
-    (case-insensitive), each returned with its neighbouring turns along the
-    conversation chain when `hops >= 1` (`hops = 0` = hits only). Use it to answer
-    "what did we say about X?" without replaying the whole history. Each row is
-    `{"message": {...}, "context": {"prev": {...}|null, "next": {...}|null}}`,
-    oldest hit first.
+    Finds the `k` messages of `session` most relevant to `query` (BM25 word
+    matching), each returned with its relevance `score` and its neighbouring
+    turns along the conversation chain when `hops >= 1` (`hops = 0` = hits
+    only). Use it to answer "what did we say about X?" without replaying the
+    whole history. Each row is `{"message": {...}, "score": float, "context":
+    {"prev": {...}|null, "next": {...}|null}}`, oldest hit first.
     """
     return _json(await kg.recall_memory(session, query, k, hops))
 
