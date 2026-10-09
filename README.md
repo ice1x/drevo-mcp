@@ -269,7 +269,7 @@ Edit `claude_desktop_config.json` (macOS:
 
 ## Tools
 
-The server exposes fourteen tools — **read, write, and migration**. The JSON
+The server exposes fifteen tools — **read, write, and migration**. The JSON
 Schema for each is generated automatically by FastMCP from the function
 signatures, so clients discover arguments via `tools/list`.
 
@@ -311,6 +311,7 @@ mirror `name` + `observations` into the drevo-indexed `body` field.
 | `vector_search` | `label`, `prop`, `query`, `k=10` | Top-`k` nodes nearest to the `query` embedding on `label`.`prop`. |
 | `semantic_search` | `query`, `label`, `prop="embedding"`, `k=10`, `model=None`, `fallback_to_fts=True` | Embed the `query` **text** via drevo's `/v1/embeddings`, then return the top-`k` nodes nearest that vector. Text-in, ranked-nodes-out. Falls back to `fts_search` when embeddings are unavailable. |
 | `hybrid_search` | `query`, `label`, `prop="embedding"`, `k=10`, `candidates=20`, `rrf_k=60`, `model=None`, `fallback_to_fts=True` | Run `query` through **both** `fts_search` (BM25) and semantic vectors, then fuse the two rankings with Reciprocal Rank Fusion. Rows add a `sources` field with each node's rank per retriever. Degrades to pure BM25 when embeddings are unavailable. |
+| `graph_search` | `query`, `label`, `prop="embedding"`, `k=5`, `hops=1`, `neighbors_per_node=10`, `candidates=20`, `rrf_k=60`, `model=None`, `fallback_to_fts=True` | Graph-aware retrieval: rank seeds via `hybrid_search`, then walk the graph `hops` steps out and return the seeds plus their deduplicated neighbourhood (`{"seeds", "expanded"}`, each expanded row carrying `distance` and the `via` edge). |
 
 `hybrid_search` combines the two retrievers over a shared pool of `candidates`
 (at least `k`) and merges them by **Reciprocal Rank Fusion** — fusing on *rank*,
@@ -319,6 +320,15 @@ not score, so BM25's and cosine's incomparable scales need no calibration. `rrf_
 terms/names/codes, vectors catch meaning, so the fused ranking usually beats
 either alone. Like `semantic_search`, it degrades to lexical BM25 (top-`k`,
 unfused) when embeddings are unavailable, unless `fallback_to_fts=false`.
+
+`graph_search` is the graph-aware path — what makes this a *graph* RAG rather
+than one more vector store. It ranks seed nodes with `hybrid_search`, then walks
+the graph outward up to `hops` steps (a breadth-first walk over single-hop
+neighbours, so no `[*1..n]` variable-length path is assumed of drevo) and returns
+`{"seeds", "expanded"}`: the ranked seeds plus their deduplicated neighbourhood,
+each expanded node tagged with its `distance` and the `via` edge that reached it.
+An LLM gets both the most-relevant nodes **and** their connected context in one
+call. `hops=0` returns seeds only.
 
 `semantic_search` is the self-contained-RAG path: one drevo instance embeds the
 query **and** searches the graph, so no external embedder is needed. It calls

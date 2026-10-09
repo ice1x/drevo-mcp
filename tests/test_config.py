@@ -35,6 +35,7 @@ EXPECTED_TOOLS = {
     "fts_search",
     "semantic_search",
     "hybrid_search",
+    "graph_search",
     "add_message",
     "get_conversation",
     "recall_memory",
