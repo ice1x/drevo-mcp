@@ -387,6 +387,136 @@ async def graph_search(
     return _json(results)
 
 
+# ── Tools: Agent memory (context graph) ───────────────────────────────
+# A drevo-native agent-memory surface so an assistant gets short-term and
+# reasoning memory over drevo without hand-writing a pipeline (drevo-mcp #15).
+# `session` is the memory scope — use one stable id per conversation/agent.
+
+
+@mcp.tool()
+@_guard
+async def add_message(session: str, role: str, text: str) -> str:
+    """Append a message to a session's memory (short-term memory chain).
+
+    Record each turn as it happens: `session` is a stable id for the
+    conversation/agent, `role` is who spoke ("user"/"assistant"/"system"/"tool"),
+    `text` is the content. Messages are kept as an ordered `:NEXT` chain and made
+    full-text searchable, so later `recall_memory` / `get_conversation` calls can
+    bring them back. Returns the stored message (with its `id` and `seq`).
+    """
+    return _json(await kg.add_message(session, role, text))
+
+
+@mcp.tool()
+@_guard
+async def get_conversation(session: str, limit: int = 50) -> str:
+    """Replay a session's recent messages in chronological order (oldest first).
+
+    Returns the last `limit` messages of `session` as `[{"id", "seq", "role",
+    "text", "created_at"}]` — the running transcript to reload as context at the
+    start of a turn.
+    """
+    return _json(await kg.get_conversation(session, limit))
+
+
+@mcp.tool()
+@_guard
+async def recall_memory(session: str, query: str, k: int = 5, hops: int = 1) -> str:
+    """Recall relevant past messages in a session, with the exchange around them.
+
+    Finds the `k` messages of `session` most relevant to `query` (BM25 word
+    matching), each returned with its relevance `score` and its neighbouring
+    turns along the conversation chain when `hops >= 1` (`hops = 0` = hits
+    only). Use it to answer "what did we say about X?" without replaying the
+    whole history. Each row is `{"message": {...}, "score": float, "context":
+    {"prev": {...}|null, "next": {...}|null}}`, oldest hit first.
+    """
+    return _json(await kg.recall_memory(session, query, k, hops))
+
+
+@mcp.tool()
+@_guard
+async def record_reasoning(
+    session: str, step: str, tool: str | None = None, outcome: str | None = None
+) -> str:
+    """Record a reasoning/decision trace in a session (reasoning memory).
+
+    Persist why something was done: `step` is the decision or reasoning, `tool`
+    the tool invoked (optional), `outcome` the result (optional). The trace is
+    linked back to the session's latest message, so the audit trail stays
+    anchored to the turn that prompted it. Returns the stored trace.
+    """
+    return _json(await kg.record_reasoning(session, step, tool, outcome))
+
+
+@mcp.tool()
+@_guard
+async def remember_entity(
+    name: str, entity_type: str, session: str | None = None, description: str | None = None
+) -> str:
+    """Remember a long-term entity (long-term memory).
+
+    `entity_type` is one of PERSON, OBJECT, LOCATION, EVENT, ORGANIZATION
+    (case-insensitive). The same (name, type) is one entity: calling again
+    reuses it and refreshes `description` when given. With `session`, the
+    session's latest message is linked to it (what this conversation
+    mentioned). Returns the entity.
+    """
+    return _json(await kg.remember_entity(session, name, entity_type, description))
+
+
+@mcp.tool()
+@_guard
+async def assert_fact(subject: str, relation: str, object: str, exclusive: bool = False) -> str:
+    """Record a fact between two remembered entities, valid from now.
+
+    E.g. subject="Dana", relation="WORKS_AT", object="Acme". Re-asserting a fact
+    that holds is a no-op. `exclusive=True` means the subject can hold only one
+    such fact at a time: the previous ones of that relation are closed (kept as
+    history), so "WORKS_AT Globex" ends "WORKS_AT Acme". Returns the fact.
+    """
+    return _json(await kg.assert_fact(subject, relation, object, exclusive))
+
+
+@mcp.tool()
+@_guard
+async def retract_fact(subject: str, relation: str, object: str) -> str:
+    """End a fact that no longer holds (it stays queryable as history).
+
+    Returns the closed facts; empty when nothing held.
+    """
+    return _json(await kg.retract_fact(subject, relation, object))
+
+
+@mcp.tool()
+@_guard
+async def facts_at(name: str, as_of: str | None = None) -> str:
+    """What long-term memory holds about an entity, now or at a past instant.
+
+    Every fact touching `name` (either direction) valid at `as_of`, an ISO-8601
+    UTC timestamp like "2026-09-29T10:00:00.000Z"; omit it for now. Each fact has
+    subject, relation, object, valid_from, valid_until.
+    """
+    return _json(await kg.facts_at(name, as_of))
+
+
+@mcp.tool()
+@_guard
+async def stable_matching(
+    proposer_label: str, acceptor_label: str, rel_type: str, rank_property: str = "rank"
+) -> str:
+    """Stable one-to-one matching of two groups by their ranked preferences.
+
+    Gale–Shapley over preferences stored as edges: each `proposer_label` node
+    ranks `acceptor_label` nodes with outgoing `rel_type` edges carrying a
+    numeric `rank_property` (lower = preferred), and vice versa. E.g. mentees ↔
+    mentors, reviewers ↔ papers. Only mutually ranked pairs match; the result is
+    stable (no two would both rather be together) and best for the proposers.
+    Returns the matched pairs with the rank each side gave the other.
+    """
+    return _json(await kg.stable_matching(proposer_label, acceptor_label, rel_type, rank_property))
+
+
 # ── Entrypoint ────────────────────────────────────────────────────────
 
 

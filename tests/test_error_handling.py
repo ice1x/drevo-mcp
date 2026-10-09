@@ -126,6 +126,32 @@ def test_connect_swallows_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     assert kg._driver is not None
 
 
+def test_connect_checks_pooled_connections_before_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A drevo restart kills every pooled Bolt connection. Without a liveness
+    check the next tool call reuses a dead one and fails ("Failed to read from
+    defunct connection" — seen live after a drevo redeploy). With
+    ``liveness_check_timeout=0`` the driver RESETs an idle connection before
+    handing it out and replaces it when that fails, so the first call after a
+    restart just works. (drevo answers RESET — verified against a live server.)
+    """
+    seen: dict[str, Any] = {}
+
+    class _Driver:
+        async def verify_connectivity(self) -> None:
+            raise ServiceUnavailable("skip index bootstrap")
+
+        async def close(self) -> None:
+            return None
+
+    def _fake_driver(*_a: Any, **kw: Any) -> _Driver:
+        seen.update(kw)
+        return _Driver()
+
+    monkeypatch.setattr(graph.AsyncGraphDatabase, "driver", _fake_driver)
+    asyncio.run(KnowledgeGraph(uri="bolt://x", username="u", password="p").connect())
+    assert seen.get("liveness_check_timeout") == 0
+
+
 # ── Server layer: structured error envelope ───────────────────────────
 
 

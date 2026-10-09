@@ -163,9 +163,15 @@ class KnowledgeGraph:
         # Note: no `notifications_disabled_categories` — that is a Bolt-5.x
         # feature, and drevo negotiates Bolt 4.4. Leaving it off keeps the
         # client compatible with both drevo and Neo4j.
+        # `liveness_check_timeout=0`: RESET a pooled connection before reusing
+        # it, and replace it when that fails. A drevo restart (redeploy,
+        # `drevo-restart.sh`) kills every pooled connection; without the check
+        # the next tool call reuses a dead one and fails with "Failed to read
+        # from defunct connection". The RESET is one cheap round trip.
         self._driver = AsyncGraphDatabase.driver(
             self.uri,
             auth=(self.username, self.password),
+            liveness_check_timeout=0,
         )
         # Best-effort: if the drevo container is down at launch, still start the
         # server so it can come up and report a structured per-call error, rather
@@ -776,3 +782,247 @@ class KnowledgeGraph:
             if not frontier:
                 break
         return {"seeds": seeds, "expanded": expanded}
+
+    # ── Agent memory (context graph) ──────────────────────────────────
+    # A drevo-native "context graph" for agent memory: a session's turns are a
+    # linked chain of ``:Message`` nodes (short-term memory), and decisions are
+    # ``:ReasoningTrace`` nodes tied back to the message that prompted them
+    # (reasoning memory). This is the interim, client-side-Cypher slice of the
+    # capability (drevo-mcp #15); once drevo grows native ``drevo.memory.*``
+    # procedures (drevo #533) these become thin wrappers. Every query stays
+    # inside drevo's proven Cypher subset (MERGE-free CREATE, ``datetime()``,
+    # ``FOREACH``/``CASE`` conditional edges, ``coalesce``, no variable-length
+    # paths) — verified live against a drevo container.
+
+    # The short-term and reasoning memory tools are thin wrappers over drevo's
+    # native ``drevo.memory.*`` procedures (drevo #533, drevo >= 0.0.34): the
+    # chain bookkeeping (seq, ``:NEXT``, ``body`` mirror, ``:INITIATED_BY``)
+    # lives in drevo, so every Bolt client writes the same graph.
+
+    async def add_message(self, session: str, role: str, text: str) -> dict[str, Any]:
+        """Append a message to a session's short-term memory chain.
+
+        drevo creates ``:Message {id, session, seq, role, text, body,
+        created_at}`` with ``seq = latest + 1`` and a ``:NEXT`` edge from the
+        previous newest message; ``body`` mirrors ``text`` so the turn is full-
+        text searchable. Returns the created message node.
+        """
+        query = """
+        CALL drevo.memory.addMessage($session, $role, $text)
+        YIELD node
+        RETURN node{.*, labels: labels(node)} AS message
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(
+                query, parameters={"session": session, "role": role, "text": text}
+            )
+            record = await result.single()
+            return _strip_vectors(dict(record["message"])) if record else {}
+
+    async def get_conversation(self, session: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Read back the most recent ``limit`` messages of ``session`` in
+        chronological order (oldest first) — the transcript to replay as
+        context for the next turn."""
+        query = """
+        CALL drevo.memory.getConversation($session, $limit)
+        YIELD node
+        RETURN node{.id, .seq, .role, .text, .created_at} AS message
+        ORDER BY node.seq
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(query, parameters={"session": session, "limit": limit})
+            return [dict(record["message"]) async for record in result]
+
+    async def recall_memory(
+        self, session: str, query: str, k: int = 5, hops: int = 1
+    ) -> list[dict[str, Any]]:
+        """Recall the most relevant past messages in a session, with context.
+
+        drevo's native ``drevo.memory.recall`` ranks the session's messages by
+        BM25 relevance to ``query`` (word matches, no embedder needed) and
+        returns the top ``k``; each comes back with its BM25 ``score`` and, when
+        ``hops >= 1``, its neighbours along the ``:NEXT`` chain (the message
+        before and after it), so the caller gets the exchange around the hit.
+        Each row is ``{"message": {...}, "score": float, "context": {"prev":
+        {...}|None, "next": {...}|None}}`` (``context`` omitted when
+        ``hops = 0``), ordered oldest hit first.
+        """
+        cypher = """
+        CALL drevo.memory.recall($session, $query, $k)
+        YIELD node, score
+        OPTIONAL MATCH (node)-[:NEXT]->(nx:Message)
+        OPTIONAL MATCH (pv:Message)-[:NEXT]->(node)
+        RETURN node{.id, .seq, .role, .text, .created_at} AS hit,
+               pv{.seq, .role, .text} AS prev,
+               nx{.seq, .role, .text} AS next,
+               score
+        ORDER BY node.seq
+        """
+        include_context = hops >= 1
+        # `query` is bound to a Cypher parameter literally named `query`, which
+        # would collide with `session.run`'s positional `query` (the Cypher
+        # string) — pass everything via `parameters=` (see :meth:`search`).
+        params = {"session": session, "query": query, "k": k}
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(cypher, parameters=params)
+            rows: list[dict[str, Any]] = []
+            async for record in result:
+                row: dict[str, Any] = {"message": dict(record["hit"]), "score": record["score"]}
+                if include_context:
+                    row["context"] = {
+                        "prev": dict(record["prev"]) if record["prev"] else None,
+                        "next": dict(record["next"]) if record["next"] else None,
+                    }
+                rows.append(row)
+            return rows
+
+    async def record_reasoning(
+        self, session: str, step: str, tool: str | None = None, outcome: str | None = None
+    ) -> dict[str, Any]:
+        """Record a reasoning/decision trace in a session's reasoning memory.
+
+        drevo creates a ``:ReasoningTrace`` node (``step`` — what was decided,
+        optional ``tool`` and ``outcome``) linked ``:INITIATED_BY`` to the
+        session's newest message (no edge when the session has none yet).
+        Returns the created trace node.
+        """
+        cypher = """
+        CALL drevo.memory.recordReasoning($session, $step, $tool, $outcome)
+        YIELD node
+        RETURN node{.*, labels: labels(node)} AS trace
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(
+                cypher,
+                parameters={"session": session, "step": step, "tool": tool, "outcome": outcome},
+            )
+            record = await result.single()
+            return dict(record["trace"]) if record else {}
+
+    # ── Long-term memory (drevo#533) ──────────────────────────────────
+    #
+    # Thin wrappers over drevo's native ``drevo.memory.*`` procedures: the
+    # memory semantics (POLE+O upsert, fact validity windows, supersession)
+    # live in drevo, so every Bolt client gets the same behaviour and nothing
+    # is re-implemented here.
+
+    async def remember_entity(
+        self,
+        session: str | None,
+        name: str,
+        entity_type: str,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Upsert a POLE+O entity (``PERSON`` / ``OBJECT`` / ``LOCATION`` /
+        ``EVENT`` / ``ORGANIZATION``) keyed on ``(name, type)``, linked
+        ``:MENTIONS`` from the session's newest message when ``session`` is set.
+        Returns the entity node without its embedding."""
+        query = """
+        CALL drevo.memory.rememberEntity($session, $name, $type, $description)
+        YIELD node
+        RETURN node{.*, labels: labels(node)} AS entity
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(
+                query,
+                parameters={
+                    "session": session,
+                    "name": name,
+                    "type": entity_type,
+                    "description": description,
+                },
+            )
+            record = await result.single()
+            return _strip_vectors(dict(record["entity"])) if record else {}
+
+    async def assert_fact(
+        self, subject: str, relation: str, obj: str, exclusive: bool = False
+    ) -> dict[str, Any]:
+        """Record that ``subject -relation-> obj`` holds from now. Idempotent
+        while it holds; ``exclusive`` first closes the subject's other current
+        facts of that relation (kept as history). Returns the fact."""
+        query = """
+        CALL drevo.memory.assertFact($subject, $relation, $object, $exclusive)
+        YIELD rel
+        RETURN rel.id AS id, rel.type AS relation,
+               rel.valid_from AS valid_from, rel.valid_until AS valid_until
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(
+                query,
+                parameters={
+                    "subject": subject,
+                    "relation": relation,
+                    "object": obj,
+                    "exclusive": exclusive,
+                },
+            )
+            record = await result.single()
+            return {"subject": subject, "object": obj, **dict(record)} if record else {}
+
+    async def retract_fact(self, subject: str, relation: str, obj: str) -> list[dict[str, Any]]:
+        """End the current ``subject -relation-> obj`` fact(s): ``valid_until``
+        is set to now and the fact stays as history. Returns the closed facts
+        (empty when nothing held)."""
+        query = """
+        CALL drevo.memory.retractFact($subject, $relation, $object)
+        YIELD rel
+        RETURN rel.id AS id, rel.type AS relation,
+               rel.valid_from AS valid_from, rel.valid_until AS valid_until
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(
+                query, parameters={"subject": subject, "relation": relation, "object": obj}
+            )
+            return [{"subject": subject, "object": obj, **dict(r)} async for r in result]
+
+    async def facts_at(self, name: str, as_of: str | None = None) -> list[dict[str, Any]]:
+        """What memory held about entity ``name`` at ``as_of`` (an ISO-8601 UTC
+        timestamp; ``None`` = now): every fact touching it, either direction,
+        valid at that instant, oldest first."""
+        query = """
+        CALL drevo.memory.factsAt($name, $as_of)
+        YIELD subject, relation, object, valid_from, valid_until
+        RETURN subject.name AS subject, relation, object.name AS object,
+               valid_from, valid_until
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(query, parameters={"name": name, "as_of": as_of})
+            return [dict(r) async for r in result]
+
+    # ── Graph algorithms ──────────────────────────────────────────────
+
+    async def stable_matching(
+        self,
+        proposer_label: str,
+        acceptor_label: str,
+        rel_type: str,
+        rank_property: str = "rank",
+    ) -> list[dict[str, Any]]:
+        """Gale–Shapley stable matching via drevo's native ``drevo.stableMatching``
+        (drevo#541): pair the ``proposer_label`` nodes with the
+        ``acceptor_label`` nodes from the preferences stored as ``rel_type``
+        edges (lower ``rank_property`` = preferred; only mutual preferences can
+        match). Proposer-optimal; one row per matched pair, node vectors
+        stripped."""
+        query = """
+        CALL drevo.stableMatching($proposer_label, $acceptor_label, $rel_type, $rank_property)
+        YIELD proposer, acceptor, proposerRank, acceptorRank
+        RETURN proposer{.*} AS proposer, acceptor{.*} AS acceptor,
+               proposerRank AS proposer_rank, acceptorRank AS acceptor_rank
+        """
+        async with self._drv.session(database=self.database) as sess:
+            result = await sess.run(
+                query,
+                parameters={
+                    "proposer_label": proposer_label,
+                    "acceptor_label": acceptor_label,
+                    "rel_type": rel_type,
+                    "rank_property": rank_property,
+                },
+            )
+            rows = [dict(r) async for r in result]
+        for row in rows:
+            row["proposer"] = _strip_vectors(dict(row["proposer"]))
+            row["acceptor"] = _strip_vectors(dict(row["acceptor"]))
+        return rows

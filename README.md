@@ -344,6 +344,49 @@ upstream configured (`DREVO_EMBEDDINGS_UPSTREAM`). Set `DREVO_HTTP_URL`
 `label`.`prop` embeddings. Pass `fallback_to_fts=false` to get an
 `embedding_error` envelope instead.
 
+### Agent memory (context graph)
+
+A drevo-native **context graph** for agent memory, so an assistant gets
+persistent short-term and reasoning memory over drevo without hand-writing a
+pipeline. A `session` is the memory scope — use one stable id per
+conversation/agent. Turns are stored as an ordered `:NEXT` chain of `:Message`
+nodes (and mirrored into the drevo-indexed `body` field, so they're searchable);
+decisions are `:ReasoningTrace` nodes linked `:INITIATED_BY` the message that
+prompted them.
+
+| Tool | Arguments | Effect |
+|------|-----------|--------|
+| `add_message` | `session`, `role`, `text` | Append a turn to the session's memory chain (auto-sequenced, `:NEXT`-linked, full-text searchable). |
+| `get_conversation` | `session`, `limit=50` | Replay the last `limit` messages in chronological order. |
+| `recall_memory` | `session`, `query`, `k=5`, `hops=1` | The `k` messages most relevant to `query` (BM25), each with its `score` and neighbouring turns (`hops>=1`) as `{"message", "score", "context": {"prev", "next"}}`. |
+| `record_reasoning` | `session`, `step`, `tool=None`, `outcome=None` | Record a reasoning/decision trace linked to the session's latest message. |
+
+These four are thin wrappers over drevo's native `drevo.memory.*` procedures
+(drevo #533), so any Bolt client writes the same graph; they need drevo 0.0.34
+or later. `recall_memory` ranks by BM25 relevance (word matches, no embedder
+required), returns each hit's `score`, and adds the conversational context.
+
+**Long-term memory** — what the agent knows about the world, as POLE+O
+entities (`PERSON`, `OBJECT`, `LOCATION`, `EVENT`, `ORGANIZATION`) and facts
+between them that hold over a validity window. Superseded facts are closed, not
+deleted, so memory can answer "what did we know then?". These are thin wrappers
+over drevo's native `drevo.memory.*` procedures (drevo #533) — the semantics
+live in drevo — so they need a drevo that ships them (the release after
+v0.0.33); an older server answers "no such procedure".
+
+| Tool | Arguments | Effect |
+|------|-----------|--------|
+| `remember_entity` | `name`, `entity_type`, `session=None`, `description=None` | Upsert an entity keyed on (name, type); with `session`, link it from the session's latest message (`:MENTIONS`). |
+| `assert_fact` | `subject`, `relation`, `object`, `exclusive=False` | Record `subject -relation-> object` valid from now; `exclusive=True` closes the subject's previous facts of that relation (e.g. a new employer ends the old one). |
+| `retract_fact` | `subject`, `relation`, `object` | End a fact that no longer holds (kept as history). |
+| `facts_at` | `name`, `as_of=None` | Every fact about `name` valid at `as_of` (ISO-8601 UTC; omit for now). |
+
+### Graph algorithms (read)
+
+| Tool | Arguments | Effect |
+|------|-----------|--------|
+| `stable_matching` | `proposer_label`, `acceptor_label`, `rel_type`, `rank_property="rank"` | Gale–Shapley stable matching of two node groups that rank each other with `rel_type` edges (lower rank = preferred; only mutual preferences match). Wraps drevo's `drevo.stableMatching` (drevo #541) — needs a drevo release that ships it. |
+
 ### Migrations (write)
 
 | Tool | Arguments | Effect |
